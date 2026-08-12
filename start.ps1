@@ -1,0 +1,27 @@
+param(
+    [switch]$Install
+)
+
+$ErrorActionPreference = "Stop"
+$projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$backendRoot = Join-Path $projectRoot "backend"
+$frontendRoot = Join-Path $projectRoot "frontend"
+$python = Join-Path $projectRoot "..\..\.venv\Scripts\python.exe"
+
+if (-not (Test-Path -LiteralPath $python)) {
+    $python = "python"
+}
+
+if ($Install) {
+    Push-Location $backendRoot
+    try { & $python -m pip install -r requirements.txt } finally { Pop-Location }
+    Push-Location $frontendRoot
+    try { & npm.cmd install } finally { Pop-Location }
+}
+
+Write-Host "启动后端: http://127.0.0.1:8000"
+Start-Process -WindowStyle Hidden -FilePath $python -ArgumentList "-m", "uvicorn", "app.main:app", "--app-dir", $backendRoot, "--reload"
+
+Write-Host "启动前端: http://127.0.0.1:5173"
+Push-Location $frontendRoot
+try { & npm.cmd run dev } finally { Pop-Location }

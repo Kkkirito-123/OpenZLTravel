@@ -1,0 +1,55 @@
+# Local documentation
+# The docs folder is kept for local learning notes and will not be uploaded.
+docs/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env
+
+# Python cache and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+env/
+.python-version
+
+# Backend runtime data
+backend/db/
+backend/**/*.db
+backend/**/*.db-journal
+backend/**/*.sqlite
+backend/**/*.sqlite3
+
+# Frontend dependencies and build output
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Exported local files
+*.pdf
+*.docx
+*.xlsx
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
