@@ -35,6 +35,7 @@ def sample_catalog() -> CandidateCatalog:
                 category="attraction",
                 latitude=30.1,
                 longitude=120.1,
+                image_url="https://images.example.com/a1.jpg",
             ),
             Poi(
                 id="a2",
@@ -43,6 +44,7 @@ def sample_catalog() -> CandidateCatalog:
                 category="attraction",
                 latitude=30.2,
                 longitude=120.2,
+                image_url="https://images.example.com/a2.jpg",
             ),
             Poi(
                 id="a3",
@@ -51,6 +53,7 @@ def sample_catalog() -> CandidateCatalog:
                 category="attraction",
                 latitude=30.3,
                 longitude=120.3,
+                image_url="https://images.example.com/a3.jpg",
             ),
         ],
         restaurants=[
@@ -61,6 +64,7 @@ def sample_catalog() -> CandidateCatalog:
                 category="restaurant",
                 latitude=30.11,
                 longitude=120.11,
+                image_url="https://images.example.com/r1.jpg",
             ),
         ],
         hotels=[
@@ -71,6 +75,7 @@ def sample_catalog() -> CandidateCatalog:
                 category="hotel",
                 latitude=30.12,
                 longitude=120.12,
+                image_url="https://images.example.com/h1.jpg",
             ),
         ],
     )
@@ -101,8 +106,13 @@ def sample_draft(days: int = 2) -> ItineraryDraft:
 
 
 class FakeMapProvider:
-    def __init__(self, candidates: CandidateCatalog | None = None) -> None:
+    def __init__(
+        self,
+        candidates: CandidateCatalog | None = None,
+        route_distance_km: float = 2.5,
+    ) -> None:
         self.candidates = candidates or sample_catalog()
+        self.route_distance_km = route_distance_km
         self.route_calls = 0
 
     def resolve_city(self, destination: str) -> City:
@@ -123,7 +133,7 @@ class FakeMapProvider:
         return RouteSegment(
             from_poi_id=from_poi.id,
             to_poi_id=to_poi.id,
-            distance_km=2.5,
+            distance_km=self.route_distance_km,
             duration_minutes=15,
             polyline=[
                 Coordinate(latitude=from_poi.latitude, longitude=from_poi.longitude),

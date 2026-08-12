@@ -7,6 +7,7 @@
 import json
 from datetime import date
 from typing import Any, Protocol, cast
+from urllib.parse import urlsplit
 
 import httpx
 from openai import OpenAI
@@ -160,7 +161,9 @@ class AmapClient:
             destination=f"{to_poi.longitude},{to_poi.latitude}",
             extensions="all",
         )
-        path = _first(payload.get("route", {}).get("paths")) or {}
+        path = _first(payload.get("route", {}).get("paths"))
+        if path is None:
+            raise ProviderError("route_not_found", "无法获取两个景点之间的驾车路线")
         polyline = [
             coordinate
             for step in path.get("steps", [])
@@ -187,6 +190,7 @@ def _parse_poi(raw: dict[str, Any], category: str) -> Poi | None:
         latitude=latitude,
         longitude=longitude,
         type_name=_text(raw.get("type")),
+        image_url=_photo_url(raw.get("photos")),
     )
 
 
@@ -217,6 +221,19 @@ def _text(value: Any) -> str:
     if isinstance(value, list):
         return "".join(str(item) for item in value)
     return str(value or "")
+
+
+def _photo_url(value: Any) -> str | None:
+    """只接受高德照片列表中的 HTTP(S) 地址，不下载第三方图片。"""
+
+    if not isinstance(value, list):
+        return None
+    for photo in value:
+        url = photo.get("url") if isinstance(photo, dict) else None
+        parsed = urlsplit(url) if isinstance(url, str) else None
+        if parsed and parsed.scheme in {"http", "https"} and parsed.netloc:
+            return url
+    return None
 
 
 def _in_range(value: Any, start_date: date, end_date: date) -> bool:

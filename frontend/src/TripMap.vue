@@ -1,65 +1,99 @@
-<!-- 只读地图组件：展示后端确认过的 POI，不参与路线或地点推断。 -->
+<!-- 只读地图组件：只渲染后端返回的真实 POI 和高德路线轨迹。 -->
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 
-import type { DayPlan } from "./types";
+import type { Coordinate, DayPlan } from "./types";
 
 const props = defineProps<{ day: DayPlan }>();
-
 const mapElement = ref<HTMLDivElement | null>(null);
 const amapKey = import.meta.env.VITE_AMAP_JS_KEY as string | undefined;
 const mapMessage = ref("");
+const hasMissingTrack = computed(() => props.day.routes.some((route) => !route.polyline.length));
 
-onMounted(() => {
+let mapScriptPromise: Promise<void> | null = null;
+
+onMounted(async () => {
   if (!amapKey) {
     mapMessage.value = "配置 VITE_AMAP_JS_KEY 后显示地图。当前仍可查看地点和路线数据。";
     return;
   }
-  loadMapScript().then(renderMap).catch(() => {
+  try {
+    await loadMapScript(amapKey);
+    renderMap();
+  } catch {
     mapMessage.value = "高德地图加载失败，请检查前端 Key 和域名白名单。";
-  });
+  }
 });
 
-function loadMapScript(): Promise<void> {
+function loadMapScript(key: string): Promise<void> {
   if (window.AMap) return Promise.resolve();
-  return new Promise((resolve, reject) => {
+  if (mapScriptPromise) return mapScriptPromise;
+  mapScriptPromise = new Promise((resolve, reject) => {
     const script = document.createElement("script");
-    script.src = `https://webapi.amap.com/maps?v=2.0&key=${amapKey}`;
+    script.src = `https://webapi.amap.com/maps?v=2.0&key=${key}`;
+    script.dataset.openzltravelAmap = "true";
     script.onload = () => resolve();
-    script.onerror = reject;
+    script.onerror = () => {
+      mapScriptPromise = null;
+      reject(new Error("高德地图脚本加载失败"));
+    };
     document.head.appendChild(script);
   });
+  return mapScriptPromise;
 }
 
 function renderMap(): void {
   if (!mapElement.value || !window.AMap) return;
-  const AMap = window.AMap;
   const spots = props.day.activities;
-  const center = spots[0] ? [spots[0].longitude, spots[0].latitude] : [116.397, 39.909];
-  const map = new AMap.Map(mapElement.value, { zoom: 12, center });
-  spots.forEach((spot, index) => {
-    const marker = new AMap.Marker({
-      position: [spot.longitude, spot.latitude],
-      title: `${index + 1}. ${spot.name}`,
-    });
-    map.add(marker);
-  });
-  const path = spots.map((spot) => [spot.longitude, spot.latitude]);
-  if (path.length > 1) map.add(new AMap.Polyline({ path, strokeColor: "#1f7a68", strokeWeight: 4 }));
+  const center = spots[0] ? position(spots[0]) : [116.397, 39.909];
+  const map = new window.AMap.Map(mapElement.value, { zoom: 12, center });
+  const overlays: unknown[] = spots.map(
+    (spot, index) =>
+      new window.AMap!.Marker({
+        position: position(spot),
+        title: `${index + 1}. ${spot.name}`,
+      }),
+  );
+  overlays.push(
+    ...props.day.routes
+      .filter((route) => route.polyline.length > 0)
+      .map(
+        (route) =>
+          new window.AMap!.Polyline({
+            path: route.polyline.map(position),
+            strokeColor: "#1f7a68",
+            strokeWeight: 5,
+            strokeOpacity: 0.85,
+          }),
+      ),
+  );
+  map.add(overlays);
+  if (overlays.length > 1) map.setFitView(overlays, false, [28, 28, 28, 28]);
+  if (hasMissingTrack.value) mapMessage.value = "部分路线暂无轨迹，仅显示对应地点。";
+}
+
+function position(point: Coordinate): [number, number] {
+  return [point.longitude, point.latitude];
 }
 </script>
 
 <template>
-  <div ref="mapElement" class="trip-map">
-    <span v-if="mapMessage">{{ mapMessage }}</span>
+  <div class="trip-map-shell">
+    <div ref="mapElement" class="trip-map" />
+    <p v-if="mapMessage" class="map-message">{{ mapMessage }}</p>
   </div>
 </template>
 
 <script lang="ts">
+interface AMapInstance {
+  add: (items: unknown | unknown[]) => void;
+  setFitView: (items: unknown[], immediately?: boolean, padding?: number[]) => void;
+}
+
 declare global {
   interface Window {
     AMap?: {
-      Map: new (element: HTMLElement, options: Record<string, unknown>) => { add: (item: unknown) => void };
+      Map: new (element: HTMLElement, options: Record<string, unknown>) => AMapInstance;
       Marker: new (options: Record<string, unknown>) => unknown;
       Polyline: new (options: Record<string, unknown>) => unknown;
     };

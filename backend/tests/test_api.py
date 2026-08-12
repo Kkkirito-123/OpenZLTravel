@@ -40,10 +40,14 @@ def test_trip_api_lifecycle(tmp_path: Path) -> None:
     )
     assert response.status_code == 201
     trip_id = response.json()["trip_id"]
+    assert response.json()["days"][0]["budget"]["total"] > 0
+    assert response.json()["days"][0]["activities"][0]["image_url"].endswith("a1.jpg")
 
     assert client.get("/api/trips").json()[0]["trip_id"] == trip_id
     assert client.get(f"/api/trips/{trip_id}").status_code == 200
-    assert client.get(f"/api/trips/{trip_id}/export/markdown").status_code == 200
+    export = client.get(f"/api/trips/{trip_id}/export/markdown")
+    assert export.status_code == 200
+    assert "当日预算" in export.text
     assert client.delete(f"/api/trips/{trip_id}").status_code == 204
     assert client.get(f"/api/trips/{trip_id}").status_code == 404
 
