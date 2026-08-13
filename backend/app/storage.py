@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
-from app.models import Itinerary, TravelRequest, TripSummary
+from app.models import CandidateCatalog, City, Itinerary, Poi, TravelRequest, TripSummary
 
 
 class TripRepository(Protocol):
@@ -127,3 +127,101 @@ class SqliteTripRepository:
         with self._connect() as connection:
             cursor = connection.execute("DELETE FROM trips WHERE trip_id = ?", (str(trip_id),))
         return cursor.rowcount == 1
+
+
+class CatalogRepository:
+    """读取离线公开数据目录，不与行程历史数据库混用。"""
+
+    SEARCH_RADIUS = 0.8
+
+    def __init__(self, database_path: str) -> None:
+        self.database_path = Path(database_path)
+
+    @property
+    def available(self) -> bool:
+        """判断目录是否已经由离线脚本生成。"""
+
+        return self.database_path.is_file()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.database_path)
+        connection.row_factory = sqlite3.Row
+        return connection
+
+    def resolve_city(self, destination: str) -> City:
+        """按城市名或 GeoNames 中文别名查找城市坐标。"""
+
+        if not self.available:
+            raise LookupError("本地数据目录尚未生成")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT c.name, c.latitude, c.longitude
+                FROM city_aliases a JOIN cities c ON c.city_id = a.city_id
+                WHERE a.alias = ?
+                ORDER BY a.population DESC
+                LIMIT 1
+                """,
+                (destination.strip(),),
+            ).fetchone()
+        if row is None:
+            raise LookupError(f"本地目录未覆盖城市：{destination}")
+        return City(name=row["name"], latitude=row["latitude"], longitude=row["longitude"])
+
+    def search_candidates(self, city: City) -> CandidateCatalog:
+        """在城市中心附近读取三类 POI，供模型选择真实地点。"""
+
+        if city.latitude is None or city.longitude is None:
+            raise LookupError("本地城市缺少坐标")
+        catalog = CandidateCatalog(
+            attractions=self._search(city, "attraction", 12),
+            restaurants=self._search(city, "restaurant", 12),
+            hotels=self._search(city, "hotel", 8),
+        )
+        if not catalog.attractions:
+            raise LookupError(f"本地目录没有找到城市附近的景点：{city.name}")
+        return catalog
+
+    def _search(self, city: City, category: str, limit: int) -> list[Poi]:
+        latitude = city.latitude or 0
+        longitude = city.longitude or 0
+        radius = self.SEARCH_RADIUS
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT poi_id, name, address, category, latitude, longitude,
+                       type_name, image_url
+                FROM pois
+                WHERE category = ?
+                  AND latitude BETWEEN ? AND ?
+                  AND longitude BETWEEN ? AND ?
+                ORDER BY ((latitude - ?) * (latitude - ?)
+                         + (longitude - ?) * (longitude - ?))
+                LIMIT ?
+                """,
+                (
+                    category,
+                    latitude - radius,
+                    latitude + radius,
+                    longitude - radius,
+                    longitude + radius,
+                    latitude,
+                    latitude,
+                    longitude,
+                    longitude,
+                    limit,
+                ),
+            ).fetchall()
+        return [
+            Poi(
+                id=row["poi_id"],
+                name=row["name"],
+                address=row["address"],
+                category=row["category"],
+                latitude=row["latitude"],
+                longitude=row["longitude"],
+                type_name=row["type_name"],
+                image_url=row["image_url"],
+            )
+            for row in rows
+        ]

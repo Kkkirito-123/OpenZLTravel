@@ -99,6 +99,18 @@ npm.cmd run build
 离线测试使用 Fake 地图、Fake 模型和 SQLite 临时数据库，不访问真实服务。真实高德和
 模型联调需要配置本地密钥，并应与离线质量门禁分开执行。
 
+## 本地公开数据
+
+项目支持使用已经下载并构建的全国本地目录，优先从 `backend/data/catalog.sqlite3` 读取城市和 POI，命中后不会调用高德城市与地点搜索接口。
+
+原始数据位于 `backend/data/raw/`：全国 OpenStreetMap PBF 和 GeoNames 城市压缩包。它们体积较大且已加入 Git 忽略，不会进入提交；需要重新构建时，在 `backend` 目录执行：
+
+```powershell
+python scripts/build_catalog.py
+```
+
+本地目录只负责城市、景点、餐饮和酒店基础事实；天气与驾车路线继续使用高德，避免把过期数据或直线距离伪装成实时结果。`ALLOW_AMAP_FALLBACK=true` 时，未覆盖的城市仍可回退高德；设为 `false` 可完全禁止这类调用。
+
 ## 设计边界
 
 当前版本采用同步受控流水线。天气超出供应商覆盖范围时标记“暂无预报”；第三方

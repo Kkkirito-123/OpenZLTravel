@@ -56,6 +56,74 @@ class MapProvider(Protocol):
         ...
 
 
+class CatalogReader(Protocol):
+    """离线目录所需的最小读取能力，避免提供方依赖具体数据库实现。"""
+
+    @property
+    def available(self) -> bool:
+        """返回本地目录是否存在。"""
+
+        ...
+
+    def resolve_city(self, destination: str) -> City:
+        """根据城市名返回本地城市事实。"""
+
+        ...
+
+    def search_candidates(self, city: City) -> CandidateCatalog:
+        """根据城市坐标返回本地 POI 候选。"""
+
+        ...
+
+
+class HybridMapProvider:
+    """优先使用本地 POI，缺少覆盖时才调用高德发现数据。"""
+
+    def __init__(
+        self,
+        catalog: CatalogReader,
+        upstream: MapProvider,
+        allow_amap_fallback: bool = True,
+    ) -> None:
+        self.catalog = catalog
+        self.upstream = upstream
+        self.allow_amap_fallback = allow_amap_fallback
+
+    def resolve_city(self, destination: str) -> City:
+        """优先从 GeoNames 城市索引解析目的地。"""
+
+        if self.catalog.available:
+            try:
+                return self.catalog.resolve_city(destination)
+            except LookupError as error:
+                self._raise_without_fallback(error)
+        return self.upstream.resolve_city(destination)
+
+    def search_candidates(self, city: City) -> CandidateCatalog:
+        """优先使用 OSM POI，避免重复调用高德地点搜索接口。"""
+
+        if self.catalog.available:
+            try:
+                return self.catalog.search_candidates(city)
+            except LookupError as error:
+                self._raise_without_fallback(error)
+        return self.upstream.search_candidates(city)
+
+    def get_weather(self, city: City, start_date: date, end_date: date) -> list[WeatherDay]:
+        """天气仍使用高德实时接口，避免离线数据冒充预报。"""
+
+        return self.upstream.get_weather(city, start_date, end_date)
+
+    def get_route(self, from_poi: Poi, to_poi: Poi) -> RouteSegment:
+        """路线仍使用高德驾车轨迹，OSM POI 不直接等同于驾车路线。"""
+
+        return self.upstream.get_route(from_poi, to_poi)
+
+    def _raise_without_fallback(self, error: LookupError) -> None:
+        if not self.allow_amap_fallback:
+            raise ProviderError("local_data_not_found", str(error)) from error
+
+
 class Planner(Protocol):
     """结构化行程规划器接口。"""
 

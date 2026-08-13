@@ -30,6 +30,11 @@ backend/**/*.db-journal
 backend/**/*.sqlite
 backend/**/*.sqlite3
 
+# Offline public data and generated catalog
+backend/data/raw/
+backend/data/catalog.sqlite3
+backend/data/*-test.sqlite3
+
 # Frontend dependencies and build output
 node_modules/
 frontend/node_modules/

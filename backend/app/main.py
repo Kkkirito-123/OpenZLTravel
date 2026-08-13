@@ -15,8 +15,8 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from app.config import Settings
 from app.errors import AppError
 from app.models import Itinerary, TravelRequest, TripSummary
-from app.providers import AmapClient, LlmPlanner
-from app.storage import SqliteTripRepository
+from app.providers import AmapClient, HybridMapProvider, LlmPlanner
+from app.storage import CatalogRepository, SqliteTripRepository
 from app.travel import TravelService, itinerary_to_markdown
 
 
@@ -25,8 +25,13 @@ def get_travel_service() -> TravelService:
     """组装进程级旅行服务，测试可通过 FastAPI 依赖覆盖替换。"""
 
     settings = Settings()
+    amap = AmapClient(settings)
     return TravelService(
-        map_provider=AmapClient(settings),
+        map_provider=HybridMapProvider(
+            catalog=CatalogRepository(settings.catalog_path),
+            upstream=amap,
+            allow_amap_fallback=settings.allow_amap_fallback,
+        ),
         planner=LlmPlanner(settings),
         repository=SqliteTripRepository(settings.database_path),
     )
