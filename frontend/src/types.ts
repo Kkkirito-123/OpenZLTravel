@@ -35,6 +35,7 @@ export interface SpotPlan {
   start_time: string;
   duration_minutes: number;
   note: string;
+  image_url: string | null;
 }
 
 export interface MealPlan {
@@ -44,6 +45,7 @@ export interface MealPlan {
   latitude: number;
   longitude: number;
   meal_type: string;
+  image_url: string | null;
 }
 
 export interface HotelPlan {
@@ -53,6 +55,7 @@ export interface HotelPlan {
   latitude: number;
   longitude: number;
   level: string;
+  image_url: string | null;
 }
 
 export interface RouteSegment {
@@ -73,6 +76,7 @@ export interface DayPlan {
   hotel: HotelPlan | null;
   routes: RouteSegment[];
   weather: WeatherDay;
+  budget: BudgetBreakdown | null;
   notes: string[];
 }
 

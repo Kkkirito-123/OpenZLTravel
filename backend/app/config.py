@@ -28,3 +28,7 @@ class Settings:
         "DATABASE_PATH", str(BACKEND_ROOT / "db" / "openzltravel.sqlite3")
     )
     amap_js_key: str = os.getenv("VITE_AMAP_JS_KEY", "")
+    catalog_path: str = os.getenv(
+        "CATALOG_PATH", str(BACKEND_ROOT / "data" / "catalog.sqlite3")
+    )
+    allow_amap_fallback: bool = os.getenv("ALLOW_AMAP_FALLBACK", "true").lower() == "true"

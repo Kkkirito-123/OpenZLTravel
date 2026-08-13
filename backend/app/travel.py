@@ -27,6 +27,11 @@ from app.providers import MapProvider, Planner
 from app.storage import TripRepository
 
 HOTEL_RATES = {"经济": 220.0, "舒适": 420.0, "品质": 760.0}
+TICKET_RATE = 80.0
+MEAL_RATE = 60.0
+DAILY_TRANSPORT_MINIMUM = 40.0
+DISTANCE_RATE = 2.5
+OTHER_RATE = 100.0
 
 
 class TravelService:
@@ -51,9 +56,10 @@ class TravelService:
             raise AppError("no_attractions", f"暂时找不到“{city.name}”的可用景点数据", 422)
         weather = self.map_provider.get_weather(city, request.start_date, request.end_date)
         draft = self._plan_with_one_repair(request, candidates)
-        days = self._assemble_days(request, draft.days, candidates, weather)
+        raw_days = self._assemble_days(request, draft.days, candidates, weather)
+        days, budget = estimate_budgets(request, raw_days)
         warnings = _weather_warnings(request, weather)
-        budget = estimate_budget(request, days)
+        warnings.extend(_budget_warnings(request, days))
         if request.budget and budget.total > request.budget:
             warnings.append(f"预估总预算 ¥{budget.total:.0f} 高于你的预算上限")
         itinerary = Itinerary(
@@ -168,7 +174,11 @@ class TravelService:
             theme=draft.theme,
             activities=activities,
             meals=_meal_plans(draft, candidates),
-            hotel=_hotel_plan(draft, candidates, request.hotel_level),
+            hotel=(
+                _hotel_plan(draft, candidates, request.hotel_level)
+                if day_date < request.end_date
+                else None
+            ),
             routes=routes,
             # 高德没有覆盖的日期必须明确标记未知，不能让模型补写天气事实。
             weather=weather or WeatherDay(date=day_date, warning="暂无预报"),
@@ -229,6 +239,7 @@ def _spot_plan(
         start_time=start_time,
         duration_minutes=duration_minutes,
         note=note,
+        image_url=poi.image_url,
     )
 
 
@@ -242,6 +253,7 @@ def _meal_plans(draft: DraftDay, candidates: CandidateCatalog) -> list[MealPlan]
             latitude=poi.latitude,
             longitude=poi.longitude,
             meal_type=meal_types[index] if index < len(meal_types) else "用餐",
+            image_url=poi.image_url,
         )
         for index, poi_id in enumerate(draft.meal_ids)
         if (poi := candidates.find(poi_id)) is not None
@@ -265,6 +277,7 @@ def _hotel_plan(
         latitude=poi.latitude,
         longitude=poi.longitude,
         level=hotel_level,
+        image_url=poi.image_url,
     )
 
 
@@ -278,27 +291,53 @@ def _weather_warnings(request: TravelRequest, weather: list[WeatherDay]) -> list
     return [f"{item.isoformat()} 暂无天气预报" for item in missing]
 
 
+def _budget_warnings(request: TravelRequest, days: list[DayPlan]) -> list[str]:
+    """提醒用户哪些住宿夜没有进入预算。"""
+
+    return [
+        f"{day.date.isoformat()} 未安排住宿，预算未包含该晚住宿费用"
+        for day in days
+        if day.date < request.end_date and day.hotel is None
+    ]
+
+
 # ============================================================================
 # 预算估算
 # ============================================================================
 
 
-def estimate_budget(request: TravelRequest, days: list[DayPlan]) -> BudgetBreakdown:
-    """根据行程规模生成透明的预算估算。
+def estimate_budgets(
+    request: TravelRequest,
+    days: list[DayPlan],
+) -> tuple[list[DayPlan], BudgetBreakdown]:
+    """先计算每日预算，再逐项汇总为全程预算。
 
     高德 POI 不提供统一的门票和住宿报价，因此这里使用固定经验参数，并在
     最终结果中明确标记为估算值，避免将其误解为供应商实时报价。
     """
 
-    nights = max(request.days_count - 1, 1)
-    activity_count = sum(len(day.activities) for day in days)
-    tickets = activity_count * 80 * request.travelers
-    meals = request.days_count * request.travelers * 3 * 60
-    hotel = nights * HOTEL_RATES[request.hotel_level]
-    distance = sum(route.distance_km for day in days for route in day.routes)
-    transport = max(80.0, distance * 2.5)
-    other = request.travelers * 100.0
-    total = tickets + meals + hotel + transport + other
+    other_costs = _split_amount(request.travelers * OTHER_RATE, len(days))
+    daily = [
+        _estimate_day_budget(request, day, other)
+        for day, other in zip(days, other_costs, strict=True)
+    ]
+    budgeted_days = [
+        day.model_copy(update={"budget": budget}) for day, budget in zip(days, daily, strict=True)
+    ]
+    return budgeted_days, _sum_budgets(daily)
+
+
+def _estimate_day_budget(
+    request: TravelRequest,
+    day: DayPlan,
+    other: float,
+) -> BudgetBreakdown:
+    distance = sum(route.distance_km for route in day.routes)
+    transport = max(DAILY_TRANSPORT_MINIMUM, distance * DISTANCE_RATE)
+    hotel = HOTEL_RATES[request.hotel_level] if day.hotel is not None else 0.0
+    meals = request.travelers * 3 * MEAL_RATE
+    tickets = len(day.activities) * request.travelers * TICKET_RATE
+    total = transport + hotel + meals + tickets + other
     return BudgetBreakdown(
         transport=round(transport, 2),
         hotel=round(hotel, 2),
@@ -307,6 +346,19 @@ def estimate_budget(request: TravelRequest, days: list[DayPlan]) -> BudgetBreakd
         other=round(other, 2),
         total=round(total, 2),
     )
+
+
+def _split_amount(total: float, parts: int) -> list[float]:
+    """平均拆分金额，并由最后一天吸收小数舍入差额。"""
+
+    base = round(total / parts, 2)
+    return [base] * (parts - 1) + [round(total - base * (parts - 1), 2)]
+
+
+def _sum_budgets(budgets: list[BudgetBreakdown]) -> BudgetBreakdown:
+    fields = ("transport", "hotel", "meals", "tickets", "other")
+    values = {field: round(sum(getattr(item, field) for item in budgets), 2) for field in fields}
+    return BudgetBreakdown(**values, total=round(sum(values.values()), 2))
 
 
 # ============================================================================
@@ -335,6 +387,8 @@ def itinerary_to_markdown(itinerary: Itinerary) -> str:
         if day.hotel:
             lines.append(f"- 住宿：{day.hotel.name}（{day.hotel.address}）")
         lines.extend(_route_lines(day.routes))
+        if day.budget:
+            lines.append(_daily_budget_line(day.budget))
         lines.extend(f"- 提醒：{note}" for note in day.notes)
     lines.extend(_budget_lines(itinerary.budget))
     if itinerary.tips:
@@ -358,6 +412,14 @@ def _route_lines(routes: list[RouteSegment]) -> list[str]:
         f"约 {item.distance_km} 公里 / {item.duration_minutes} 分钟"
         for item in routes
     ]
+
+
+def _daily_budget_line(budget: BudgetBreakdown) -> str:
+    return (
+        f"- 当日预算：交通 ¥{budget.transport:.0f} / 住宿 ¥{budget.hotel:.0f} / "
+        f"餐饮 ¥{budget.meals:.0f} / 门票 ¥{budget.tickets:.0f} / "
+        f"其他 ¥{budget.other:.0f}，合计 ¥{budget.total:.0f}（估算）"
+    )
 
 
 def _budget_lines(budget: BudgetBreakdown) -> list[str]:

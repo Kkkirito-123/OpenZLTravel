@@ -76,6 +76,7 @@ class Poi(BaseModel):
     latitude: float
     longitude: float
     type_name: str = ""
+    image_url: str | None = None
 
 
 class CandidateCatalog(BaseModel):
@@ -97,12 +98,12 @@ class CandidateCatalog(BaseModel):
         return [*self.attractions, *self.restaurants, *self.hotels]
 
     def prompt_data(self) -> dict[str, list[dict[str, object]]]:
-        """生成只包含必要事实的模型输入。"""
+        """生成只包含必要事实的模型输入，图片不参与规划决策。"""
 
         return {
-            "attractions": [poi.model_dump() for poi in self.attractions],
-            "restaurants": [poi.model_dump() for poi in self.restaurants],
-            "hotels": [poi.model_dump() for poi in self.hotels],
+            "attractions": [poi.model_dump(exclude={"image_url"}) for poi in self.attractions],
+            "restaurants": [poi.model_dump(exclude={"image_url"}) for poi in self.restaurants],
+            "hotels": [poi.model_dump(exclude={"image_url"}) for poi in self.hotels],
         }
 
 
@@ -169,6 +170,7 @@ class SpotPlan(BaseModel):
     start_time: str
     duration_minutes: int
     note: str = ""
+    image_url: str | None = None
 
 
 class MealPlan(BaseModel):
@@ -180,6 +182,7 @@ class MealPlan(BaseModel):
     latitude: float
     longitude: float
     meal_type: str
+    image_url: str | None = None
 
 
 class HotelPlan(BaseModel):
@@ -191,6 +194,7 @@ class HotelPlan(BaseModel):
     latitude: float
     longitude: float
     level: str
+    image_url: str | None = None
 
 
 class RouteSegment(BaseModel):
@@ -204,20 +208,6 @@ class RouteSegment(BaseModel):
     polyline: list[Coordinate] = Field(default_factory=list)
 
 
-class DayPlan(BaseModel):
-    """最终的一日行程。"""
-
-    day_index: int
-    date: date
-    theme: str
-    activities: list[SpotPlan]
-    meals: list[MealPlan] = Field(default_factory=list)
-    hotel: HotelPlan | None = None
-    routes: list[RouteSegment] = Field(default_factory=list)
-    weather: WeatherDay
-    notes: list[str] = Field(default_factory=list)
-
-
 class BudgetBreakdown(BaseModel):
     """估算预算明细。"""
 
@@ -227,6 +217,21 @@ class BudgetBreakdown(BaseModel):
     tickets: float = 0
     other: float = 0
     total: float = 0
+
+
+class DayPlan(BaseModel):
+    """最终的一日行程；旧记录没有每日预算时保持为空。"""
+
+    day_index: int
+    date: date
+    theme: str
+    activities: list[SpotPlan]
+    meals: list[MealPlan] = Field(default_factory=list)
+    hotel: HotelPlan | None = None
+    routes: list[RouteSegment] = Field(default_factory=list)
+    weather: WeatherDay
+    budget: BudgetBreakdown | None = None
+    notes: list[str] = Field(default_factory=list)
 
 
 class Itinerary(BaseModel):

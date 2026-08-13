@@ -1,0 +1,2 @@
+# 仅用于离线导入 OSM PBF，不参与 FastAPI 运行时依赖
+osmium>=4.3,<5
