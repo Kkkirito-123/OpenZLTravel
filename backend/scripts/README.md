@@ -34,4 +34,6 @@ python -m pip install -r requirements-data.txt
 python scripts/build_catalog.py
 ```
 
-运行时会优先读取本地 POI；本地目录没有覆盖时，是否回退高德由 `ALLOW_AMAP_FALLBACK` 控制。天气和驾车路线仍使用高德，避免把 OSM 地物或直线距离误当成实时路线和天气。
+运行时会优先读取本地 POI；本地目录没有覆盖时，是否回退高德由 `ALLOW_AMAP_FALLBACK` 控制。
+天气优先使用 Open-Meteo，普通步行和驾车采用本地估算；公交、地铁和明确选择的实时驾车
+才调用高德，避免把 OSM 地物或直线距离误当成实时路线。

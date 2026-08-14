@@ -6,6 +6,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backendRoot = Join-Path $projectRoot "backend"
 $frontendRoot = Join-Path $projectRoot "frontend"
+$agentRoot = (Resolve-Path (Join-Path $projectRoot "..\..")).Path
 $python = Join-Path $projectRoot "..\..\.venv\Scripts\python.exe"
 
 if (-not (Test-Path -LiteralPath $python)) {
@@ -13,6 +14,7 @@ if (-not (Test-Path -LiteralPath $python)) {
 }
 
 if ($Install) {
+    & $python -m pip install -e $agentRoot
     Push-Location $backendRoot
     try { & $python -m pip install -r requirements.txt } finally { Pop-Location }
     Push-Location $frontendRoot
@@ -20,7 +22,7 @@ if ($Install) {
 }
 
 Write-Host "启动后端: http://127.0.0.1:8000"
-Start-Process -WindowStyle Hidden -FilePath $python -ArgumentList "-m", "uvicorn", "app.main:app", "--app-dir", $backendRoot, "--reload"
+Start-Process -WindowStyle Hidden -FilePath $python -ArgumentList "-m", "uvicorn", "app.main:app", "--app-dir", $backendRoot, "--host", "127.0.0.1", "--port", "8000", "--reload"
 
 Write-Host "启动前端: http://127.0.0.1:5173"
 Push-Location $frontendRoot

@@ -1,11 +1,13 @@
 from datetime import date
 
+import httpx
 import pytest
 
 from app.config import Settings
 from app.errors import ProviderError
 from app.models import City, Poi
-from app.providers import AmapClient
+from app.providers import AmapClient, _gcj02_to_wgs84
+from app.storage import SqliteTripRepository
 
 
 def test_amap_response_is_converted_to_domain_models() -> None:
@@ -53,9 +55,15 @@ def test_amap_response_is_converted_to_domain_models() -> None:
     catalog = client.search_candidates(city)
     weather = client.get_weather(city, date(2026, 9, 1), date(2026, 9, 1))
 
-    assert city == City(name="测试市", adcode="123", latitude=30.1, longitude=120.1)
+    city_latitude, city_longitude = _gcj02_to_wgs84(30.1, 120.1)
+    assert city == City(
+        name="测试市",
+        adcode="123",
+        latitude=city_latitude,
+        longitude=city_longitude,
+    )
     assert catalog.attractions[0].id == "p1"
-    assert catalog.attractions[0].latitude == 30.2
+    assert catalog.attractions[0].latitude == pytest.approx(_gcj02_to_wgs84(30.2, 120.2)[0])
     assert catalog.attractions[0].image_url == "https://images.example.com/park.jpg"
     assert weather[0].day_weather == "晴"
 
@@ -111,7 +119,9 @@ def test_route_parser_keeps_real_coordinates() -> None:
 
     assert route.distance_km == 2.5
     assert route.duration_minutes == 15
-    assert route.polyline[0].latitude == 30.1
+    latitude, longitude = _gcj02_to_wgs84(30.1, 120.1)
+    assert route.polyline[0].latitude == pytest.approx(latitude)
+    assert route.polyline[0].longitude == pytest.approx(longitude)
 
 
 def test_missing_route_path_uses_stable_error() -> None:
@@ -124,3 +134,86 @@ def test_missing_route_path_uses_stable_error() -> None:
         client.get_route(from_poi, to_poi)
 
     assert error.value.code == "route_not_found"
+
+
+def test_rate_limit_is_converted_to_stable_error(tmp_path) -> None:
+    client = AmapClient(
+        Settings(amap_api_key="test", amap_cache_path=str(tmp_path / "amap-cache.json"))
+    )
+    calls = 0
+
+    class RateLimitedHttp:
+        def get(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                200,
+                request=httpx.Request("GET", "https://example.test"),
+                json={
+                    "status": "0",
+                    "info": "CUQPS_HAS_EXCEEDED_THE_LIMIT",
+                    "infocode": "10021",
+                },
+            )
+
+    client.http = RateLimitedHttp()
+
+    with pytest.raises(ProviderError) as error:
+        client._get("/weather/weatherInfo", city="杭州")
+    with pytest.raises(ProviderError) as second_error:
+        client._get("/weather/weatherInfo", city="杭州")
+
+    assert error.value.code == "amap_rate_limited"
+    assert "频率限制" in error.value.message
+    assert second_error.value.code == "amap_rate_limited"
+    assert calls == 1
+
+
+def test_successful_response_is_reused_from_disk(tmp_path) -> None:
+    cache_path = str(tmp_path / "amap-cache.json")
+    client = AmapClient(Settings(amap_api_key="test", amap_cache_path=cache_path))
+    calls = 0
+
+    class SuccessfulHttp:
+        def get(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                200,
+                request=httpx.Request("GET", "https://example.test"),
+                json={"status": "1", "pois": []},
+            )
+
+    client.http = SuccessfulHttp()
+    first = client._get("/place/text", city="杭州", keywords="景点")
+    second = client._get("/place/text", city="杭州", keywords="景点")
+    restored = AmapClient(Settings(amap_api_key="", amap_cache_path=cache_path))
+
+    assert first == second == {"status": "1", "pois": []}
+    assert restored._get("/place/text", city="杭州", keywords="景点") == first
+    assert calls == 1
+
+
+def test_successful_response_is_reused_from_sqlite(tmp_path) -> None:
+    repository = SqliteTripRepository(str(tmp_path / "state.sqlite3"))
+    settings = Settings(amap_api_key="test", amap_cache_path=str(tmp_path / "unused.json"))
+    client = AmapClient(settings, repository)
+    calls = 0
+
+    class SuccessfulHttp:
+        def get(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return httpx.Response(
+                200,
+                request=httpx.Request("GET", "https://example.test"),
+                json={"status": "1", "pois": []},
+            )
+
+    client.http = SuccessfulHttp()
+    first = client._get("/place/text", city="杭州", keywords="景点")
+    restored = AmapClient(Settings(amap_api_key=""), repository)
+
+    assert restored._get("/place/text", city="杭州", keywords="景点") == first
+    assert not (tmp_path / "unused.json").exists()
+    assert calls == 1
