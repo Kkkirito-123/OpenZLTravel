@@ -4,26 +4,35 @@
 外部请求交给 providers，持久化交给 storage，不在这里处理 HTTP 响应。
 """
 
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
+from typing import cast
 from uuid import UUID, uuid4
 
-from app.errors import AppError, DraftError, NotFoundError
+from app.errors import AppError, ConflictError, DraftError, NotFoundError
 from app.models import (
+    AccommodationPlan,
     BudgetBreakdown,
     CandidateCatalog,
+    City,
+    DayActivityEdit,
+    DayEditRequest,
     DayPlan,
     DraftDay,
     HotelPlan,
+    IntercityPlan,
     Itinerary,
     ItineraryDraft,
     MealPlan,
+    Poi,
     RouteSegment,
     SpotPlan,
     TravelRequest,
+    TripAlternatives,
     TripSummary,
     WeatherDay,
 )
-from app.providers import MapProvider, Planner
+from app.providers import MapProvider, Planner, TransportResult
 from app.storage import TripRepository
 
 HOTEL_RATES = {"经济": 220.0, "舒适": 420.0, "品质": 760.0}
@@ -56,14 +65,62 @@ class TravelService:
             raise AppError("no_attractions", f"暂时找不到“{city.name}”的可用景点数据", 422)
         weather = self.map_provider.get_weather(city, request.start_date, request.end_date)
         draft = self._plan_with_one_repair(request, candidates)
-        raw_days = self._assemble_days(request, draft.days, candidates, weather)
+        itinerary = self._build_itinerary(request, city, draft, candidates, weather, None)
+        # 所有外部查询和业务校验都成功后才保存，避免历史记录出现半成品。
+        self.repository.save(itinerary, request)
+        return itinerary
+
+    def build_itinerary(
+        self,
+        request: TravelRequest,
+        city: City,
+        candidates: CandidateCatalog,
+        draft: ItineraryDraft,
+        weather: list[WeatherDay],
+        transport: Mapping[int, TransportResult],
+        transport_warnings: list[str] | None = None,
+    ) -> Itinerary:
+        """根据工作流已经取得的事实组装完整行程，但不触发保存。"""
+
+        return self._build_itinerary(
+            request,
+            city,
+            draft,
+            candidates,
+            weather,
+            transport,
+            transport_warnings,
+        )
+
+    def _build_itinerary(
+        self,
+        request: TravelRequest,
+        city: City,
+        draft: ItineraryDraft,
+        candidates: CandidateCatalog,
+        weather: list[WeatherDay],
+        transport: Mapping[int, TransportResult] | None,
+        transport_warnings: list[str] | None = None,
+        *,
+        trip_id: UUID | None = None,
+        planning_session_id: UUID | None = None,
+        intercity: IntercityPlan | None = None,
+        accommodation: AccommodationPlan | None = None,
+    ) -> Itinerary:
+        raw_days = self._assemble_days(request, draft.days, candidates, weather, transport)
+        raw_days = _apply_accommodation(raw_days, accommodation, request.hotel_level)
         days, budget = estimate_budgets(request, raw_days)
         warnings = _weather_warnings(request, weather)
-        warnings.extend(_budget_warnings(request, days))
+        warnings.extend(_budget_warnings(request, days, accommodation))
+        warnings.extend(transport_warnings or [])
         if request.budget and budget.total > request.budget:
             warnings.append(f"预估总预算 ¥{budget.total:.0f} 高于你的预算上限")
+        days, budget = _apply_selected_costs(
+            days, budget, request, intercity, accommodation
+        )
         itinerary = Itinerary(
-            trip_id=uuid4(),
+            trip_id=trip_id or uuid4(),
+            planning_session_id=planning_session_id,
             destination=city.name,
             start_date=request.start_date,
             end_date=request.end_date,
@@ -71,11 +128,54 @@ class TravelService:
             summary=draft.summary,
             days=days,
             budget=budget,
+            intercity=intercity,
+            accommodation=accommodation,
             tips=draft.tips,
             warnings=warnings,
             created_at=datetime.now(timezone.utc),
         )
-        # 所有外部查询和业务校验都成功后才保存，避免历史记录出现半成品。
+        return itinerary
+
+    def build_workbench_itinerary(
+        self,
+        request: TravelRequest,
+        city: City,
+        candidates: CandidateCatalog,
+        draft: ItineraryDraft,
+        weather: list[WeatherDay],
+        transport: Mapping[int, TransportResult],
+        session_id: UUID,
+        intercity: IntercityPlan,
+        accommodation: AccommodationPlan,
+        warnings: list[str],
+    ) -> Itinerary:
+        """组装工作台结果，事实选择和会话 ID 均由运行时提供。"""
+
+        return self._build_itinerary(
+            request,
+            city,
+            draft,
+            candidates,
+            weather,
+            transport,
+            warnings,
+            trip_id=session_id,
+            planning_session_id=session_id,
+            intercity=intercity,
+            accommodation=accommodation,
+        )
+
+    async def create_async(self, request: TravelRequest) -> Itinerary:
+        """通过 LangGraph 编排异步生成；测试替身仍兼容旧同步接口。"""
+
+        if not hasattr(self.map_provider, "get_transport_async"):
+            import asyncio
+
+            return await asyncio.to_thread(self.create, request)
+        from app.workflow import TravelWorkflow
+
+        itinerary = await TravelWorkflow(self).run(request)
+        # 只有图中所有事实和规则校验完成后才写入一次，避免半成品历史记录。
         self.repository.save(itinerary, request)
         return itinerary
 
@@ -137,6 +237,7 @@ class TravelService:
         draft_days: list[DraftDay],
         candidates: CandidateCatalog,
         weather: list[WeatherDay],
+        transport: Mapping[int, TransportResult] | None = None,
     ) -> list[DayPlan]:
         weather_by_date = {item.date: item for item in weather}
         return [
@@ -145,6 +246,7 @@ class TravelService:
                 draft_day,
                 candidates,
                 weather_by_date.get(request.start_date + timedelta(days=draft_day.day_index - 1)),
+                transport.get(draft_day.day_index) if transport else None,
             )
             for draft_day in sorted(draft_days, key=lambda item: item.day_index)
         ]
@@ -155,6 +257,7 @@ class TravelService:
         draft: DraftDay,
         candidates: CandidateCatalog,
         weather: WeatherDay | None,
+        transport: TransportResult | None = None,
     ) -> DayPlan:
         activities = [
             _spot_plan(
@@ -166,7 +269,11 @@ class TravelService:
             )
             for activity in draft.activities
         ]
-        routes = self._get_routes(activities, candidates)
+        routes = (
+            transport.routes
+            if transport is not None
+            else self._get_routes(activities, candidates)
+        )
         day_date = request.start_date + timedelta(days=draft.day_index - 1)
         return DayPlan(
             day_index=draft.day_index,
@@ -218,6 +325,60 @@ class TravelService:
 
         if not self.repository.delete(trip_id):
             raise NotFoundError()
+
+    def alternatives(self, trip_id: UUID, candidates: CandidateCatalog) -> TripAlternatives:
+        """返回编辑时允许引用的真实候选景点。"""
+
+        itinerary = self.get(trip_id)
+        return TripAlternatives(
+            trip_id=trip_id,
+            revision=itinerary.revision,
+            attractions=candidates.attractions,
+        )
+
+    async def edit_day(
+        self,
+        trip_id: UUID,
+        day_index: int,
+        edit: DayEditRequest,
+        candidates: CandidateCatalog,
+    ) -> Itinerary:
+        """编辑一天并只重算该日路线与全程预算。"""
+
+        itinerary = self.get(trip_id)
+        request = self.repository.get_request(trip_id)
+        if request is None:
+            raise NotFoundError()
+        if itinerary.revision != edit.expected_revision:
+            raise ConflictError()
+        if not 1 <= day_index <= len(itinerary.days):
+            raise AppError("day_not_found", "行程中不存在这一天", 404)
+        activities = [_edited_spot(item, candidates) for item in edit.activities]
+        pois = [candidates.find(item.poi_id) for item in activities]
+        routes = await _edited_routes(
+            self.map_provider,
+            City(name=itinerary.destination),
+            [poi for poi in pois if poi],
+            request.transport_mode,
+        )
+        changed = itinerary.days[day_index - 1].model_copy(
+            update={"activities": activities, "routes": routes}
+        )
+        days = list(itinerary.days)
+        days[day_index - 1] = changed
+        budgeted_days, budget = estimate_budgets(request, days)
+        budgeted_days, budget = _apply_selected_costs(
+            budgeted_days,
+            budget,
+            request,
+            itinerary.intercity,
+            itinerary.accommodation,
+        )
+        updated = itinerary.model_copy(
+            update={"days": budgeted_days, "budget": budget, "revision": itinerary.revision + 1}
+        )
+        self.repository.save(updated, request)
+        return updated
 
 
 def _spot_plan(
@@ -291,13 +452,48 @@ def _weather_warnings(request: TravelRequest, weather: list[WeatherDay]) -> list
     return [f"{item.isoformat()} 暂无天气预报" for item in missing]
 
 
-def _budget_warnings(request: TravelRequest, days: list[DayPlan]) -> list[str]:
+def _budget_warnings(
+    request: TravelRequest,
+    days: list[DayPlan],
+    accommodation: AccommodationPlan | None = None,
+) -> list[str]:
     """提醒用户哪些住宿夜没有进入预算。"""
 
+    if accommodation and accommodation.self_arranged:
+        return ["住宿由用户自行安排，预算未包含住宿费用。"]
+    if accommodation and accommodation.hotel:
+        return []
     return [
         f"{day.date.isoformat()} 未安排住宿，预算未包含该晚住宿费用"
         for day in days
         if day.date < request.end_date and day.hotel is None
+    ]
+
+
+def _apply_accommodation(
+    days: list[DayPlan],
+    accommodation: AccommodationPlan | None,
+    hotel_level: str,
+) -> list[DayPlan]:
+    """把已选酒店投影到住宿夜；缺少坐标时只保留顶部住宿事实。"""
+
+    if not accommodation or not accommodation.hotel or accommodation.self_arranged:
+        return days
+    hotel = accommodation.hotel
+    if hotel.latitude is None or hotel.longitude is None:
+        return days
+    plan = HotelPlan(
+        poi_id=hotel.hotel_id,
+        name=hotel.name,
+        address=hotel.address,
+        latitude=hotel.latitude,
+        longitude=hotel.longitude,
+        level=hotel_level,
+        image_url=hotel.image_url,
+    )
+    return [
+        day.model_copy(update={"hotel": plan}) if day.date < accommodation.check_out else day
+        for day in days
     ]
 
 
@@ -325,6 +521,112 @@ def estimate_budgets(
         day.model_copy(update={"budget": budget}) for day, budget in zip(days, daily, strict=True)
     ]
     return budgeted_days, _sum_budgets(daily)
+
+
+def _apply_selected_costs(
+    days: list[DayPlan],
+    budget: BudgetBreakdown,
+    request: TravelRequest,
+    intercity: IntercityPlan | None,
+    accommodation: AccommodationPlan | None,
+) -> tuple[list[DayPlan], BudgetBreakdown]:
+    """用已选真实报价替换经验住宿费，并同步每日与全程预算。"""
+
+    if intercity is None and accommodation is None:
+        return days, budget
+    outbound, return_trip = _rail_costs(intercity, request.travelers)
+    rail = outbound + return_trip
+    hotel = _hotel_total(accommodation)
+    nightly = _split_amount(hotel, max(1, len(days) - 1)) if hotel else []
+    adjusted: list[DayPlan] = []
+    for index, day in enumerate(days):
+        if day.budget is None:
+            adjusted.append(day)
+            continue
+        rail_cost = (outbound if index == 0 else 0) + (
+            return_trip if index == len(days) - 1 else 0
+        )
+        hotel_cost = nightly[index] if index < len(nightly) else 0.0
+        old = day.budget
+        transport = round(old.transport + rail_cost, 2)
+        total = round(old.total - old.hotel + hotel_cost + rail_cost, 2)
+        updated = old.model_copy(
+            update={
+                "transport": transport,
+                "local_transport": old.transport,
+                "intercity_transport": rail_cost if rail_cost else None,
+                "hotel": hotel_cost,
+                "total": total,
+            }
+        )
+        adjusted.append(day.model_copy(update={"budget": updated}))
+    summed = _sum_budgets([day.budget for day in adjusted if day.budget])
+    summed = summed.model_copy(
+        update={
+            "local_transport": budget.transport,
+            "intercity_transport": rail if rail else None,
+        }
+    )
+    return adjusted, summed
+
+
+def _rail_costs(intercity: IntercityPlan | None, travelers: int) -> tuple[float, float]:
+    if intercity is None:
+        return 0.0, 0.0
+    outbound = intercity.outbound.price_from if intercity.outbound else None
+    return_trip = intercity.return_trip.price_from if intercity.return_trip else None
+    return (
+        round((outbound or 0) * travelers, 2),
+        round((return_trip or 0) * travelers, 2),
+    )
+
+
+def _hotel_total(accommodation: AccommodationPlan | None) -> float:
+    if not accommodation or not accommodation.hotel or accommodation.self_arranged:
+        return 0.0
+    hotel = accommodation.hotel
+    if hotel.total_price is not None:
+        return round(hotel.total_price, 2)
+    if hotel.price_per_night is not None:
+        return round(hotel.price_per_night * accommodation.nights, 2)
+    return 0.0
+
+
+def _edited_spot(item: DayActivityEdit, candidates: CandidateCatalog) -> SpotPlan:
+    poi = candidates.find(item.poi_id)
+    if poi is None or poi.category != "attraction":
+        raise AppError("invalid_poi", "编辑只能使用候选列表中的真实景点", 422)
+    return SpotPlan(
+        poi_id=poi.id,
+        name=poi.name,
+        address=poi.address,
+        latitude=poi.latitude,
+        longitude=poi.longitude,
+        start_time=item.start_time,
+        duration_minutes=item.duration_minutes,
+        note="用户调整后的安排",
+        image_url=poi.image_url,
+    )
+
+
+async def _edited_routes(
+    provider: MapProvider,
+    city: City,
+    pois: list[Poi],
+    mode: str,
+) -> list[RouteSegment]:
+    """编辑后优先复用异步交通能力，旧 Provider 则在线程中逐段查询。"""
+
+    import asyncio
+
+    operation = getattr(provider, "get_transport_async", None)
+    if operation is not None:
+        result = cast(TransportResult, await operation(city, pois, mode))
+        return result.routes
+    routes: list[RouteSegment] = []
+    for left, right in zip(pois, pois[1:], strict=False):
+        routes.append(await asyncio.to_thread(provider.get_route, left, right))
+    return routes
 
 
 def _estimate_day_budget(
@@ -407,11 +709,19 @@ def _activity_lines(activities: list[SpotPlan]) -> list[str]:
 
 
 def _route_lines(routes: list[RouteSegment]) -> list[str]:
-    return [
-        f"- 路线：{item.from_poi_id} → {item.to_poi_id}，"
-        f"约 {item.distance_km} 公里 / {item.duration_minutes} 分钟"
-        for item in routes
-    ]
+    lines: list[str] = []
+    for item in routes:
+        source = item.source.provider if item.source else "unknown"
+        line = (
+            f"- 路线：{item.from_poi_id} → {item.to_poi_id}，{item.mode}，"
+            f"约 {item.distance_km} 公里 / {item.duration_minutes} 分钟，来源：{source}"
+        )
+        lines.append(line)
+        lines.extend(
+            f"  - {transit.name}：{transit.departure_stop} → {transit.arrival_stop}"
+            for transit in item.transit_lines
+        )
+    return lines
 
 
 def _daily_budget_line(budget: BudgetBreakdown) -> str:
@@ -439,4 +749,5 @@ def _weather_line(weather: WeatherDay) -> str:
     values = weather.day_weather, weather.day_temperature
     if not any(values):
         return "天气：暂无预报"
-    return f"天气：{values[0] or '未知'}，白天 {values[1] or '未知'}℃"
+    source = weather.source.provider if weather.source else "unknown"
+    return f"天气：{values[0] or '未知'}，白天 {values[1] or '未知'}℃，来源：{source}"

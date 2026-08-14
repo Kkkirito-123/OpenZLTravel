@@ -3,15 +3,20 @@ import { createApp } from "vue";
 import { createRouter, createWebHistory } from "vue-router";
 
 import App from "./App.vue";
+import ChatPage from "./pages/ChatPage.vue";
 import HistoryPage from "./pages/HistoryPage.vue";
 import PlanPage from "./pages/PlanPage.vue";
+import SessionPage from "./pages/SessionPage.vue";
 import TripPage from "./pages/TripPage.vue";
 import "./styles.css";
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: "/", component: PlanPage },
+    { path: "/", component: ChatPage },
+    { path: "/chat/:sessionId", component: ChatPage },
+    { path: "/plan", component: PlanPage },
+    { path: "/planning/:sessionId", component: SessionPage },
     { path: "/result/:tripId", component: TripPage },
     { path: "/history", component: HistoryPage },
   ],

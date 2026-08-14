@@ -33,3 +33,10 @@ class NotFoundError(AppError):
 
     def __init__(self, message: str = "行程不存在") -> None:
         super().__init__("trip_not_found", message, status_code=404)
+
+
+class ConflictError(AppError):
+    """客户端基于过期版本编辑资源。"""
+
+    def __init__(self, message: str = "行程已经更新，请刷新后重试") -> None:
+        super().__init__("revision_conflict", message, status_code=409)

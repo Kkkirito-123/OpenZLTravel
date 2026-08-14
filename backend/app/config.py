@@ -20,15 +20,67 @@ class Settings:
     amap_api_key: str = os.getenv("AMAP_API_KEY", "")
     amap_base_url: str = os.getenv("AMAP_BASE_URL", "https://restapi.amap.com/v3")
     amap_timeout_seconds: float = float(os.getenv("AMAP_TIMEOUT_SECONDS", "20"))
+    amap_cache_path: str = os.getenv(
+        "AMAP_CACHE_PATH", str(BACKEND_ROOT / "data" / "amap-cache.json")
+    )
+    amap_cache_ttl_seconds: int = int(os.getenv("AMAP_CACHE_TTL_SECONDS", "86400"))
+    amap_min_interval_seconds: float = float(os.getenv("AMAP_MIN_INTERVAL_SECONDS", "0.4"))
+    amap_rate_limit_cooldown_seconds: float = float(
+        os.getenv("AMAP_RATE_LIMIT_COOLDOWN_SECONDS", "30")
+    )
+    amap_scheduler_concurrency: int = int(os.getenv("AMAP_SCHEDULER_CONCURRENCY", "2"))
+    open_meteo_base_url: str = os.getenv(
+        "OPEN_METEO_BASE_URL", "https://api.open-meteo.com/v1/forecast"
+    )
+    open_meteo_timeout_seconds: float = float(os.getenv("OPEN_METEO_TIMEOUT_SECONDS", "15"))
     llm_api_key: str = os.getenv("LLM_API_KEY", "")
     llm_base_url: str = os.getenv("LLM_BASE_URL", "")
     llm_model: str = os.getenv("LLM_MODEL", "")
     llm_timeout_seconds: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "60"))
+    llm_enhancement_timeout_seconds: float = float(
+        os.getenv("LLM_ENHANCEMENT_TIMEOUT_SECONDS", "8")
+    )
+    intent_llm_timeout_seconds: float = float(
+        os.getenv("INTENT_LLM_TIMEOUT_SECONDS", "8")
+    )
+    intent_context_max_chars: int = int(os.getenv("INTENT_CONTEXT_MAX_CHARS", "5000"))
+    intent_max_input_tokens: int = int(os.getenv("INTENT_MAX_INPUT_TOKENS", "2048"))
+    intent_max_output_tokens: int = int(os.getenv("INTENT_MAX_OUTPUT_TOKENS", "512"))
+    intent_session_token_limit: int = int(
+        os.getenv("INTENT_SESSION_TOKEN_LIMIT", "20000")
+    )
+    intent_result_cache_ttl_seconds: int = int(
+        os.getenv("INTENT_RESULT_CACHE_TTL_SECONDS", "3600")
+    )
+    # 只有确认模型服务支持 OpenAI prompt_cache_key 时才配置；空值保持兼容。
+    intent_prompt_cache_key: str = os.getenv("INTENT_PROMPT_CACHE_KEY", "")
+    conversation_recent_token_limit: int = int(
+        os.getenv("CONVERSATION_RECENT_TOKEN_LIMIT", "3000")
+    )
+    conversation_summary_token_limit: int = int(
+        os.getenv("CONVERSATION_SUMMARY_TOKEN_LIMIT", "800")
+    )
+    rail_mcp_url: str = os.getenv("RAIL_MCP_URL", "http://127.0.0.1:8001/mcp")
+    rail_mcp_timeout_seconds: float = float(os.getenv("RAIL_MCP_TIMEOUT_SECONDS", "12"))
+    rollinggo_hotel_base_url: str = os.getenv(
+        "ROLLINGGO_HOTEL_BASE_URL", "https://mcp.rollinggo.cn/mcp"
+    )
+    rollinggo_hotel_token_path: str = os.getenv(
+        "ROLLINGGO_HOTEL_TOKEN_PATH", str(Path.home() / ".hotel-cli" / "token.json")
+    )
+    rollinggo_hotel_timeout_seconds: float = float(
+        os.getenv("ROLLINGGO_HOTEL_TIMEOUT_SECONDS", "12")
+    )
+    # 兼容早期供应商 Token 配置；新环境优先使用 RollingGo OAuth 登录。
+    dida_mcp_url: str = os.getenv("DIDA_MCP_URL", "https://mcp.rollinggo.cn/mcp")
+    dida_api_key: str = os.getenv("DIDA_API_KEY", "")
+    dida_mcp_timeout_seconds: float = float(os.getenv("DIDA_MCP_TIMEOUT_SECONDS", "12"))
+    provider_concurrency: int = int(os.getenv("PROVIDER_CONCURRENCY", "4"))
+    provider_failure_threshold: int = int(os.getenv("PROVIDER_FAILURE_THRESHOLD", "3"))
+    provider_cooldown_seconds: float = float(os.getenv("PROVIDER_COOLDOWN_SECONDS", "30"))
     database_path: str = os.getenv(
         "DATABASE_PATH", str(BACKEND_ROOT / "db" / "openzltravel.sqlite3")
     )
     amap_js_key: str = os.getenv("VITE_AMAP_JS_KEY", "")
-    catalog_path: str = os.getenv(
-        "CATALOG_PATH", str(BACKEND_ROOT / "data" / "catalog.sqlite3")
-    )
+    catalog_path: str = os.getenv("CATALOG_PATH", str(BACKEND_ROOT / "data" / "catalog.sqlite3"))
     allow_amap_fallback: bool = os.getenv("ALLOW_AMAP_FALLBACK", "true").lower() == "true"

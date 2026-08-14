@@ -24,6 +24,7 @@ env/
 .python-version
 
 # Backend runtime data
+/db/
 backend/db/
 backend/**/*.db
 backend/**/*.db-journal
@@ -34,6 +35,8 @@ backend/**/*.sqlite3
 backend/data/raw/
 backend/data/catalog.sqlite3
 backend/data/*-test.sqlite3
+backend/data/amap-cache.json
+backend/data/amap-cache.json.tmp
 
 # Frontend dependencies and build output
 node_modules/
