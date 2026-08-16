@@ -513,9 +513,7 @@ class TripAlternatives(BaseModel):
 
 AssistantFlow = Literal["destination_discovery", "trip_planning"]
 AssistantSkillId = Literal["destination_discovery", "trip_planning"]
-AssistantStatus = Literal[
-    "collecting", "recommendation_ready", "planning_started", "closed"
-]
+AssistantStatus = Literal["collecting", "recommendation_ready", "planning_started", "closed"]
 MemorySlotName = Literal[
     "origin",
     "preferences",
@@ -574,9 +572,7 @@ class TravelDialogueSlots(BaseModel):
     distance_preference: Literal["near", "far"] | None = None
     pace: Literal["轻松", "适中", "紧凑"] = "适中"
     hotel_level: Literal["经济", "舒适", "品质"] = "舒适"
-    transport_mode: Literal[
-        "auto", "walk", "driving", "transit", "realtime_driving"
-    ] = "auto"
+    transport_mode: Literal["auto", "walk", "driving", "transit", "realtime_driving"] = "auto"
     notes: str = Field(default="", max_length=500)
 
 

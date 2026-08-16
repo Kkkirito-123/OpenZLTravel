@@ -1,0 +1,85 @@
+# 公共地点库 ER 图
+
+展示统一地点、行政树、来源、名称、边界、GeoNames 与 OSM POI 的双语关系。
+
+```mermaid
+%%{init: {"theme":"base","themeVariables":{"fontFamily":"Microsoft YaHei, Arial, sans-serif","primaryColor":"#F8FAFC","primaryTextColor":"#111827","primaryBorderColor":"#64748B","lineColor":"#334155","tertiaryColor":"#ECFDF5","background":"#FFFFFF"}}}%%
+erDiagram
+    SRC ||--o{ LOCSRC : "提供来源映射"
+    SRC o|--o{ LOCNAME : "提供名称"
+    SRC ||--o{ BOUND : "提供边界"
+    LOC ||--o{ LOCSRC : "保留来源"
+    LOC ||--o{ LOCNAME : "拥有名称"
+    LOC ||--o| REG : "行政区子类型"
+    LOC ||--o| GEO : "地名子类型"
+    LOC ||--o| POI : "旅行地点子类型"
+    LOC ||--o| REGMATCH : "产生挂接"
+    REG o|--o{ REG : "父级包含子级"
+    REG ||--o| BOUND : "拥有边界"
+    REG o|--o{ REGMATCH : "接收地点"
+
+    SRC["source / 数据来源 "] {
+        smallint sourceid PK "来源编号"
+        text sourcecode UK "来源代码"
+        text version "数据版本"
+        text licensename "许可证"
+        text checksumsha256 "文件哈希"
+    }
+    LOC["location / 统一地点 "] {
+        uuid locationid PK "统一地点编号"
+        text kind "行政区-地名-POI"
+        text canonicalname "主名称"
+        geometry pointgeom "WGS84 坐标"
+        float importance "排序权重"
+    }
+    LOCSRC["locationsource / 来源映射 "] {
+        uuid locationid FK "地点编号"
+        smallint sourceid FK "来源编号"
+        text sourcekey "来源原始编号"
+        boolean isprimary "是否主来源"
+    }
+    REG["region / 行政区 "] {
+        uuid regionid PK,FK "行政区编号"
+        char adcode UK "十二位行政代码"
+        uuid parentid FK "父级编号"
+        smallint level "层级 0 至 5"
+        ltree path UK "树路径"
+        text name "官方名称"
+        text status "当前-历史-待核定"
+    }
+    LOCNAME["locationname / 地点名称 "] {
+        bigint nameid PK "名称编号"
+        uuid locationid FK "地点编号"
+        smallint sourceid FK "来源编号"
+        text name "展示名称"
+        text normalizedname "规范检索名"
+        text nametype "名称类型"
+    }
+    GEO["geoplace / GeoNames 地名 "] {
+        uuid locationid PK,FK "地点编号"
+        bigint geonameid UK "GeoNames 编号"
+        text featureclass "要素大类"
+        text featurecode "要素代码"
+        bigint population "人口"
+    }
+    POI["poi / 旅行地点 "] {
+        uuid locationid PK,FK "地点编号"
+        text elementtype "OSM 元素类型"
+        bigint elementid "OSM 编号"
+        text category "景点-餐厅-酒店"
+        char sourceadcode "明确行政代码"
+    }
+    BOUND["boundary / 行政边界 "] {
+        uuid regionid PK,FK "行政区编号"
+        smallint sourceid FK "来源编号"
+        geometry centergeom "中心点"
+        geometry boundarygeom "多面边界"
+        text originalsystem "原始坐标系"
+    }
+    REGMATCH["regionmatch / 行政区挂接 "] {
+        uuid locationid PK,FK "地点编号"
+        uuid regionid FK "行政区编号"
+        text matchmethod "代码-空间-未匹配"
+        numeric confidence "置信度"
+    }
+```

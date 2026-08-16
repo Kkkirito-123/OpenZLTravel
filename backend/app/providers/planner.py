@@ -170,9 +170,7 @@ class CopyEnhancer:
 
         return bool(self.settings.llm_api_key and self.settings.llm_model)
 
-    def enhance(
-        self, request: PlanningRequest, draft: ItineraryDraft
-    ) -> ItineraryDraft:
+    def enhance(self, request: PlanningRequest, draft: ItineraryDraft) -> ItineraryDraft:
         """润色现有文案，地点、交通、天气和价格完全不进入输出。"""
 
         if not self.enabled:
@@ -264,9 +262,7 @@ def _system_prompt() -> str:
 每天安排 1 到 4 个景点，餐厅和酒店只能从对应候选池选择。"""
 
 
-def _user_prompt(
-    request: TravelRequest, candidates: CandidateCatalog, feedback: str | None
-) -> str:
+def _user_prompt(request: TravelRequest, candidates: CandidateCatalog, feedback: str | None) -> str:
     payload: dict[str, Any] = {
         "request": request.model_dump(mode="json"),
         "candidates": candidates.prompt_data(),

@@ -1,7 +1,8 @@
 """OpenZLTravel 的核心旅行流程。
 
-本文件集中管理行程编排、事实校验、结果组装、预算估算和 Markdown 导出。
-外部请求交给 providers，持久化交给 storage，不在这里处理 HTTP 响应。
+本文件只编排行程事实、校验模型草稿、读写行程和局部编辑。预算规则放在
+``travel_budget``，Markdown 导出放在 ``travel_export``；外部请求交给 providers，
+持久化交给 storage，不在这里处理 HTTP 响应。
 """
 
 from collections.abc import Mapping
@@ -12,7 +13,6 @@ from uuid import UUID, uuid4
 from app.errors import AppError, ConflictError, DraftError, NotFoundError
 from app.models import (
     AccommodationPlan,
-    BudgetBreakdown,
     CandidateCatalog,
     City,
     DayActivityEdit,
@@ -34,13 +34,17 @@ from app.models import (
 )
 from app.providers import MapProvider, Planner, TransportResult
 from app.storage import TripRepository
+from app.travel_budget import (
+    apply_accommodation,
+    apply_selected_costs,
+    budget_limit_warning,
+    budget_warnings,
+    estimate_budgets,
+    replace_budget_limit_warning,
+)
+from app.travel_export import itinerary_to_markdown
 
-HOTEL_RATES = {"经济": 220.0, "舒适": 420.0, "品质": 760.0}
-TICKET_RATE = 80.0
-MEAL_RATE = 60.0
-DAILY_TRANSPORT_MINIMUM = 40.0
-DISTANCE_RATE = 2.5
-OTHER_RATE = 100.0
+__all__ = ["TravelService", "itinerary_to_markdown"]
 
 
 class TravelService:
@@ -108,16 +112,15 @@ class TravelService:
         accommodation: AccommodationPlan | None = None,
     ) -> Itinerary:
         raw_days = self._assemble_days(request, draft.days, candidates, weather, transport)
-        raw_days = _apply_accommodation(raw_days, accommodation, request.hotel_level)
+        raw_days = apply_accommodation(raw_days, accommodation, request.hotel_level)
         days, budget = estimate_budgets(request, raw_days)
         warnings = _weather_warnings(request, weather)
-        warnings.extend(_budget_warnings(request, days, accommodation))
+        warnings.extend(budget_warnings(request, days, accommodation))
         warnings.extend(transport_warnings or [])
-        if request.budget and budget.total > request.budget:
-            warnings.append(f"预估总预算 ¥{budget.total:.0f} 高于你的预算上限")
-        days, budget = _apply_selected_costs(
-            days, budget, request, intercity, accommodation
-        )
+        days, budget = apply_selected_costs(days, budget, request, intercity, accommodation)
+        limit_warning = budget_limit_warning(request, budget)
+        if limit_warning:
+            warnings.append(limit_warning)
         itinerary = Itinerary(
             trip_id=trip_id or uuid4(),
             planning_session_id=planning_session_id,
@@ -270,9 +273,7 @@ class TravelService:
             for activity in draft.activities
         ]
         routes = (
-            transport.routes
-            if transport is not None
-            else self._get_routes(activities, candidates)
+            transport.routes if transport is not None else self._get_routes(activities, candidates)
         )
         day_date = request.start_date + timedelta(days=draft.day_index - 1)
         return DayPlan(
@@ -367,7 +368,7 @@ class TravelService:
         days = list(itinerary.days)
         days[day_index - 1] = changed
         budgeted_days, budget = estimate_budgets(request, days)
-        budgeted_days, budget = _apply_selected_costs(
+        budgeted_days, budget = apply_selected_costs(
             budgeted_days,
             budget,
             request,
@@ -375,9 +376,15 @@ class TravelService:
             itinerary.accommodation,
         )
         updated = itinerary.model_copy(
-            update={"days": budgeted_days, "budget": budget, "revision": itinerary.revision + 1}
+            update={
+                "days": budgeted_days,
+                "budget": budget,
+                "revision": itinerary.revision + 1,
+                "warnings": replace_budget_limit_warning(itinerary.warnings, request, budget),
+            }
         )
-        self.repository.save(updated, request)
+        if not self.repository.save_if_revision(updated, request, edit.expected_revision):
+            raise ConflictError()
         return updated
 
 
@@ -452,146 +459,6 @@ def _weather_warnings(request: TravelRequest, weather: list[WeatherDay]) -> list
     return [f"{item.isoformat()} 暂无天气预报" for item in missing]
 
 
-def _budget_warnings(
-    request: TravelRequest,
-    days: list[DayPlan],
-    accommodation: AccommodationPlan | None = None,
-) -> list[str]:
-    """提醒用户哪些住宿夜没有进入预算。"""
-
-    if accommodation and accommodation.self_arranged:
-        return ["住宿由用户自行安排，预算未包含住宿费用。"]
-    if accommodation and accommodation.hotel:
-        return []
-    return [
-        f"{day.date.isoformat()} 未安排住宿，预算未包含该晚住宿费用"
-        for day in days
-        if day.date < request.end_date and day.hotel is None
-    ]
-
-
-def _apply_accommodation(
-    days: list[DayPlan],
-    accommodation: AccommodationPlan | None,
-    hotel_level: str,
-) -> list[DayPlan]:
-    """把已选酒店投影到住宿夜；缺少坐标时只保留顶部住宿事实。"""
-
-    if not accommodation or not accommodation.hotel or accommodation.self_arranged:
-        return days
-    hotel = accommodation.hotel
-    if hotel.latitude is None or hotel.longitude is None:
-        return days
-    plan = HotelPlan(
-        poi_id=hotel.hotel_id,
-        name=hotel.name,
-        address=hotel.address,
-        latitude=hotel.latitude,
-        longitude=hotel.longitude,
-        level=hotel_level,
-        image_url=hotel.image_url,
-    )
-    return [
-        day.model_copy(update={"hotel": plan}) if day.date < accommodation.check_out else day
-        for day in days
-    ]
-
-
-# ============================================================================
-# 预算估算
-# ============================================================================
-
-
-def estimate_budgets(
-    request: TravelRequest,
-    days: list[DayPlan],
-) -> tuple[list[DayPlan], BudgetBreakdown]:
-    """先计算每日预算，再逐项汇总为全程预算。
-
-    高德 POI 不提供统一的门票和住宿报价，因此这里使用固定经验参数，并在
-    最终结果中明确标记为估算值，避免将其误解为供应商实时报价。
-    """
-
-    other_costs = _split_amount(request.travelers * OTHER_RATE, len(days))
-    daily = [
-        _estimate_day_budget(request, day, other)
-        for day, other in zip(days, other_costs, strict=True)
-    ]
-    budgeted_days = [
-        day.model_copy(update={"budget": budget}) for day, budget in zip(days, daily, strict=True)
-    ]
-    return budgeted_days, _sum_budgets(daily)
-
-
-def _apply_selected_costs(
-    days: list[DayPlan],
-    budget: BudgetBreakdown,
-    request: TravelRequest,
-    intercity: IntercityPlan | None,
-    accommodation: AccommodationPlan | None,
-) -> tuple[list[DayPlan], BudgetBreakdown]:
-    """用已选真实报价替换经验住宿费，并同步每日与全程预算。"""
-
-    if intercity is None and accommodation is None:
-        return days, budget
-    outbound, return_trip = _rail_costs(intercity, request.travelers)
-    rail = outbound + return_trip
-    hotel = _hotel_total(accommodation)
-    nightly = _split_amount(hotel, max(1, len(days) - 1)) if hotel else []
-    adjusted: list[DayPlan] = []
-    for index, day in enumerate(days):
-        if day.budget is None:
-            adjusted.append(day)
-            continue
-        rail_cost = (outbound if index == 0 else 0) + (
-            return_trip if index == len(days) - 1 else 0
-        )
-        hotel_cost = nightly[index] if index < len(nightly) else 0.0
-        old = day.budget
-        transport = round(old.transport + rail_cost, 2)
-        total = round(old.total - old.hotel + hotel_cost + rail_cost, 2)
-        updated = old.model_copy(
-            update={
-                "transport": transport,
-                "local_transport": old.transport,
-                "intercity_transport": rail_cost if rail_cost else None,
-                "hotel": hotel_cost,
-                "total": total,
-            }
-        )
-        adjusted.append(day.model_copy(update={"budget": updated}))
-    summed = _sum_budgets([day.budget for day in adjusted if day.budget])
-    summed = summed.model_copy(
-        update={
-            "local_transport": budget.transport,
-            "intercity_transport": rail if rail else None,
-        }
-    )
-    return adjusted, summed
-
-
-def _rail_costs(intercity: IntercityPlan | None, travelers: int) -> tuple[float, float]:
-    if intercity is None:
-        return 0.0, 0.0
-    outbound = intercity.outbound.price_from if intercity.outbound else None
-    return_trip = intercity.return_trip.price_from if intercity.return_trip else None
-    return (
-        round((outbound or 0) * travelers, 2),
-        round((return_trip or 0) * travelers, 2),
-    )
-
-
-def _hotel_total(accommodation: AccommodationPlan | None) -> float:
-    if not accommodation or not accommodation.hotel or accommodation.self_arranged:
-        return 0.0
-    hotel = accommodation.hotel
-    if hotel.total_price is not None:
-        return round(hotel.total_price, 2)
-    if hotel.price_per_night is not None:
-        return round(hotel.price_per_night * accommodation.nights, 2)
-    return 0.0
-
-
 def _edited_spot(item: DayActivityEdit, candidates: CandidateCatalog) -> SpotPlan:
     poi = candidates.find(item.poi_id)
     if poi is None or poi.category != "attraction":
@@ -627,127 +494,3 @@ async def _edited_routes(
     for left, right in zip(pois, pois[1:], strict=False):
         routes.append(await asyncio.to_thread(provider.get_route, left, right))
     return routes
-
-
-def _estimate_day_budget(
-    request: TravelRequest,
-    day: DayPlan,
-    other: float,
-) -> BudgetBreakdown:
-    distance = sum(route.distance_km for route in day.routes)
-    transport = max(DAILY_TRANSPORT_MINIMUM, distance * DISTANCE_RATE)
-    hotel = HOTEL_RATES[request.hotel_level] if day.hotel is not None else 0.0
-    meals = request.travelers * 3 * MEAL_RATE
-    tickets = len(day.activities) * request.travelers * TICKET_RATE
-    total = transport + hotel + meals + tickets + other
-    return BudgetBreakdown(
-        transport=round(transport, 2),
-        hotel=round(hotel, 2),
-        meals=round(meals, 2),
-        tickets=round(tickets, 2),
-        other=round(other, 2),
-        total=round(total, 2),
-    )
-
-
-def _split_amount(total: float, parts: int) -> list[float]:
-    """平均拆分金额，并由最后一天吸收小数舍入差额。"""
-
-    base = round(total / parts, 2)
-    return [base] * (parts - 1) + [round(total - base * (parts - 1), 2)]
-
-
-def _sum_budgets(budgets: list[BudgetBreakdown]) -> BudgetBreakdown:
-    fields = ("transport", "hotel", "meals", "tickets", "other")
-    values = {field: round(sum(getattr(item, field) for item in budgets), 2) for field in fields}
-    return BudgetBreakdown(**values, total=round(sum(values.values()), 2))
-
-
-# ============================================================================
-# Markdown 导出
-# ============================================================================
-
-
-def itinerary_to_markdown(itinerary: Itinerary) -> str:
-    """将结构化行程转换为适合保存和分享的 Markdown。"""
-
-    lines = [
-        f"# {itinerary.destination}旅行计划",
-        "",
-        f"{itinerary.start_date} 至 {itinerary.end_date}，共 {itinerary.travelers} 人",
-        "",
-        f"> {itinerary.summary}",
-        "",
-        "## 每日行程",
-    ]
-    for day in itinerary.days:
-        lines.extend(["", f"### 第{day.day_index}天 · {day.date} · {day.theme}"])
-        lines.append(_weather_line(day.weather))
-        lines.extend(_activity_lines(day.activities))
-        if day.meals:
-            lines.append("- 用餐：" + "、".join(meal.name for meal in day.meals))
-        if day.hotel:
-            lines.append(f"- 住宿：{day.hotel.name}（{day.hotel.address}）")
-        lines.extend(_route_lines(day.routes))
-        if day.budget:
-            lines.append(_daily_budget_line(day.budget))
-        lines.extend(f"- 提醒：{note}" for note in day.notes)
-    lines.extend(_budget_lines(itinerary.budget))
-    if itinerary.tips:
-        lines.extend(["", "## 旅行建议", *[f"- {tip}" for tip in itinerary.tips]])
-    if itinerary.warnings:
-        lines.extend(["", "## 数据提示", *[f"- {item}" for item in itinerary.warnings]])
-    return "\n".join(lines) + "\n"
-
-
-def _activity_lines(activities: list[SpotPlan]) -> list[str]:
-    return [
-        f"- {item.start_time} **{item.name}**（{item.duration_minutes} 分钟）："
-        f"{item.note or '自由游览'}，地址：{item.address}"
-        for item in activities
-    ]
-
-
-def _route_lines(routes: list[RouteSegment]) -> list[str]:
-    lines: list[str] = []
-    for item in routes:
-        source = item.source.provider if item.source else "unknown"
-        line = (
-            f"- 路线：{item.from_poi_id} → {item.to_poi_id}，{item.mode}，"
-            f"约 {item.distance_km} 公里 / {item.duration_minutes} 分钟，来源：{source}"
-        )
-        lines.append(line)
-        lines.extend(
-            f"  - {transit.name}：{transit.departure_stop} → {transit.arrival_stop}"
-            for transit in item.transit_lines
-        )
-    return lines
-
-
-def _daily_budget_line(budget: BudgetBreakdown) -> str:
-    return (
-        f"- 当日预算：交通 ¥{budget.transport:.0f} / 住宿 ¥{budget.hotel:.0f} / "
-        f"餐饮 ¥{budget.meals:.0f} / 门票 ¥{budget.tickets:.0f} / "
-        f"其他 ¥{budget.other:.0f}，合计 ¥{budget.total:.0f}（估算）"
-    )
-
-
-def _budget_lines(budget: BudgetBreakdown) -> list[str]:
-    return [
-        "",
-        "## 预算估算",
-        f"- 交通：¥{budget.transport:.0f}",
-        f"- 住宿：¥{budget.hotel:.0f}",
-        f"- 餐饮：¥{budget.meals:.0f}",
-        f"- 门票：¥{budget.tickets:.0f}",
-        f"- 其他：¥{budget.other:.0f}",
-        f"- 合计：¥{budget.total:.0f}",
-    ]
-
-
-def _weather_line(weather: WeatherDay) -> str:
-    values = weather.day_weather, weather.day_temperature
-    if not any(values):
-        return "天气：暂无预报"
-    source = weather.source.provider if weather.source else "unknown"
-    return f"天气：{values[0] or '未知'}，白天 {values[1] or '未知'}℃，来源：{source}"

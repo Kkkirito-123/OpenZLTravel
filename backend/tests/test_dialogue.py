@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 from re_zlagent.harness.conversation import ConversationContext, ConversationTurn
 from re_zlagent.harness.model import ModelMessage, ModelResponse
+from re_zlagent.harness.model.openai_compatible import OpenAICompatibleModelClient
 
 from app.dialogue import (
     CancelFlowCommand,
@@ -58,6 +59,21 @@ class SequenceModel:
         return ModelResponse(self.responses.pop(0))
 
 
+class BlockingModel:
+    """显式控制模型完成时机，验证取消某个等待者不会取消共享调用。"""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = 0
+
+    async def complete(self, messages: tuple[ModelMessage, ...]) -> ModelResponse:
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
+        return ModelResponse('{"commands":[{"type":"start_flow","flow":"trip_planning"}]}')
+
+
 class UsageModel:
     """返回供应商缓存计量，验证 KV 命中只作为观测值处理。"""
 
@@ -84,9 +100,7 @@ class DictCache:
     def get_cache(self, provider: str, key: str) -> object | None:
         return self.values.get((provider, key))
 
-    def set_cache(
-        self, provider: str, key: str, value: object, ttl_seconds: int
-    ) -> None:
+    def set_cache(self, provider: str, key: str, value: object, ttl_seconds: int) -> None:
         assert ttl_seconds > 0
         self.values[(provider, key)] = value
 
@@ -106,7 +120,8 @@ class CaptureTransport:
         timeout_seconds: float,
     ) -> dict[str, object]:
         self.payload = dict(payload)
-        return {"choices": [{"message": {"content": "{}"}}]}
+        content = '{"commands":[{"type":"start_flow","flow":"trip_planning"}]}'
+        return {"choices": [{"message": {"content": content}}]}
 
 
 def dialogue_state(
@@ -187,9 +202,7 @@ def test_fast_parser_requires_explicit_memory_language() -> None:
 
 def test_model_cannot_write_memory_without_explicit_authorization() -> None:
     batch = TravelCommandBatch(
-        commands=[
-            RememberSlotCommand(type="remember_slot", name="pace", value="轻松")
-        ]
+        commands=[RememberSlotCommand(type="remember_slot", name="pace", value="轻松")]
     )
 
     with pytest.raises(AppError) as caught:
@@ -199,13 +212,9 @@ def test_model_cannot_write_memory_without_explicit_authorization() -> None:
 
 
 def test_fast_parser_handles_explicit_date_range_and_rejects_invalid_date() -> None:
-    state = dialogue_state(
-        active_flow="trip_planning", pending_slots=["start_date", "end_date"]
-    )
+    state = dialogue_state(active_flow="trip_planning", pending_slots=["start_date", "end_date"])
 
-    batch = parse_fast_commands(
-        "2026-09-01 到 2026-09-03", state, today=date(2026, 8, 14)
-    )
+    batch = parse_fast_commands("2026-09-01 到 2026-09-03", state, today=date(2026, 8, 14))
 
     assert batch is not None
     updated, _ = apply_commands(state, batch, FakeCityResolver(), now=NOW)
@@ -217,9 +226,7 @@ def test_fast_parser_handles_explicit_date_range_and_rejects_invalid_date() -> N
 
 def test_command_schema_rejects_unknown_command_and_slot() -> None:
     with pytest.raises(ValidationError):
-        TravelCommandBatch.model_validate(
-            {"commands": [{"type": "call_tool", "name": "amap"}]}
-        )
+        TravelCommandBatch.model_validate({"commands": [{"type": "call_tool", "name": "amap"}]})
     with pytest.raises(ValidationError):
         TravelCommandBatch.model_validate(
             {"commands": [{"type": "set_slot", "name": "poi", "value": "外滩"}]}
@@ -272,7 +279,8 @@ async def test_command_generator_repairs_invalid_output_once() -> None:
 
     assert isinstance(generated.batch.commands[0], StartFlowCommand)
     assert len(model.calls) == 2
-    assert generated.metadata["token_budget"]["max_output_tokens"] == 512
+    assert "token_budget" not in generated.metadata
+    assert generated.usage.total_tokens > 0
 
 
 @pytest.mark.asyncio
@@ -312,6 +320,21 @@ async def test_provider_cached_tokens_are_recorded_without_changing_total() -> N
 
 
 @pytest.mark.asyncio
+async def test_intent_request_does_not_send_max_tokens() -> None:
+    transport = CaptureTransport()
+    model = OpenAICompatibleModelClient(
+        base_url="https://api.example.test/v1",
+        model="test-model",
+        transport=transport,  # type: ignore[arg-type]
+    )
+
+    await TravelCommandGenerator(model).generate("规划上海", dialogue_state(), None)
+
+    assert "max_tokens" not in transport.payload
+    assert transport.payload["response_format"] == {"type": "json_object"}
+
+
+@pytest.mark.asyncio
 async def test_same_intent_inflight_request_is_merged() -> None:
     model = SequenceModel(
         '{"commands":[{"type":"start_flow","flow":"trip_planning"}]}',
@@ -326,6 +349,31 @@ async def test_same_intent_inflight_request_is_merged() -> None:
 
     assert len(model.calls) == 1
     assert {first.source, second.source} == {"llm", "intent_cache"}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_intent_waiter_keeps_shared_model_request() -> None:
+    """浏览器取消首个请求后，后续相同消息仍应复用正在执行的模型调用。"""
+
+    model = BlockingModel()
+    generator = TravelCommandGenerator(model)
+    owner = asyncio.create_task(generator.generate("规划上海", dialogue_state(), None))
+    await model.started.wait()
+    follower = asyncio.create_task(generator.generate("规划上海", dialogue_state(), None))
+    await asyncio.sleep(0)
+
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    assert generator._inflight
+
+    model.release.set()
+    result = await follower
+    await asyncio.sleep(0)
+
+    assert result.source == "intent_cache"
+    assert model.calls == 1
+    assert generator._inflight == {}
 
 
 @pytest.mark.asyncio
@@ -370,9 +418,7 @@ def test_guangxi_history_discovery_reaches_recommendation_ready() -> None:
     first = TravelCommandBatch(
         commands=[
             StartFlowCommand(type="start_flow", flow="destination_discovery"),
-            SetSlotCommand(
-                type="set_slot", name="destination_region", value="广西"
-            ),
+            SetSlotCommand(type="set_slot", name="destination_region", value="广西"),
             SetSlotCommand(type="set_slot", name="preferences", value=["历史景点"]),
         ]
     )

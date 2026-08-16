@@ -40,23 +40,12 @@ class Settings:
     llm_enhancement_timeout_seconds: float = float(
         os.getenv("LLM_ENHANCEMENT_TIMEOUT_SECONDS", "8")
     )
-    intent_llm_timeout_seconds: float = float(
-        os.getenv("INTENT_LLM_TIMEOUT_SECONDS", "8")
-    )
+    intent_llm_timeout_seconds: float = float(os.getenv("INTENT_LLM_TIMEOUT_SECONDS", "15"))
     intent_context_max_chars: int = int(os.getenv("INTENT_CONTEXT_MAX_CHARS", "5000"))
-    intent_max_input_tokens: int = int(os.getenv("INTENT_MAX_INPUT_TOKENS", "2048"))
-    intent_max_output_tokens: int = int(os.getenv("INTENT_MAX_OUTPUT_TOKENS", "512"))
-    intent_session_token_limit: int = int(
-        os.getenv("INTENT_SESSION_TOKEN_LIMIT", "20000")
-    )
-    intent_result_cache_ttl_seconds: int = int(
-        os.getenv("INTENT_RESULT_CACHE_TTL_SECONDS", "3600")
-    )
+    intent_result_cache_ttl_seconds: int = int(os.getenv("INTENT_RESULT_CACHE_TTL_SECONDS", "3600"))
     # 只有确认模型服务支持 OpenAI prompt_cache_key 时才配置；空值保持兼容。
     intent_prompt_cache_key: str = os.getenv("INTENT_PROMPT_CACHE_KEY", "")
-    conversation_recent_token_limit: int = int(
-        os.getenv("CONVERSATION_RECENT_TOKEN_LIMIT", "3000")
-    )
+    conversation_recent_token_limit: int = int(os.getenv("CONVERSATION_RECENT_TOKEN_LIMIT", "3000"))
     conversation_summary_token_limit: int = int(
         os.getenv("CONVERSATION_SUMMARY_TOKEN_LIMIT", "800")
     )

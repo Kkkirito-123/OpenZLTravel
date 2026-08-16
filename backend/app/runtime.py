@@ -59,6 +59,7 @@ class PlanningRuntime:
         self.rail = rail
         self.hotels = hotels
         self.tasks: dict[UUID, asyncio.Task[None]] = {}
+        self._session_tasks: dict[UUID, set[asyncio.Task[None]]] = {}
         self.locks: dict[UUID, asyncio.Lock] = {}
 
     def start(
@@ -76,7 +77,7 @@ class PlanningRuntime:
         )
         session = self.repository.create_session(candidate, idempotency_key)
         if session.session_id == candidate.session_id:
-            self._schedule(session.session_id, self._run_discovery(session.session_id))
+            self._schedule(session.session_id, lambda: self._run_discovery(session.session_id))
         return session
 
     def get(self, session_id: UUID) -> PlanningSession:
@@ -91,12 +92,17 @@ class PlanningRuntime:
         """服务启动后恢复中断在查询或生成阶段的任务。"""
 
         for session in self.repository.list_recoverable_sessions():
-            operation = (
-                self._run_generation(session.session_id)
-                if session.status == "generating"
-                else self._run_discovery(session.session_id)
-            )
-            self._schedule(session.session_id, operation)
+            session_id = session.session_id
+            if session.status == "generating":
+                self._schedule(
+                    session_id,
+                    _task_factory(self._run_generation, session_id),
+                )
+            else:
+                self._schedule(
+                    session_id,
+                    _task_factory(self._run_discovery, session_id),
+                )
 
     async def update_selection(
         self, session_id: UUID, selection: PlanningSelection
@@ -136,17 +142,16 @@ class PlanningRuntime:
             except AppError:
                 continue
             updates[field] = [
-                quoted if item.option_id == quoted.option_id else item
-                for item in options
+                quoted if item.option_id == quoted.option_id else item for item in options
             ]
         return updates
 
-    async def search_transfers(
-        self, session_id: UUID, direction: str
-    ) -> list[RailOption]:
+    async def search_transfers(self, session_id: UUID, direction: str) -> list[RailOption]:
         """按需查询中转方案并保存到会话。"""
 
         session = self.get(session_id)
+        if session.status != "awaiting_selection":
+            raise AppError("invalid_session_state", "当前阶段不能查询中转车次", 409)
         request = session.request
         if direction == "outbound":
             origin, destination, travel_date = (
@@ -163,6 +168,8 @@ class PlanningRuntime:
         options, _ = await self.rail.transfers(origin, destination, travel_date, direction)
         async with self._lock(session_id):
             current = self.get(session_id)
+            if current.status != "awaiting_selection":
+                raise AppError("invalid_session_state", "当前阶段不能查询中转车次", 409)
             field = "outbound_transfers" if direction == "outbound" else "return_transfers"
             updated = current.model_copy(update={field: options, "updated_at": _now()})
             self.repository.save_session(updated)
@@ -197,7 +204,7 @@ class PlanningRuntime:
                 }
             )
             self.repository.save_session(updated)
-        self._schedule(session_id, self._run_generation(session_id))
+        self._schedule(session_id, lambda: self._run_generation(session_id))
         return updated
 
     async def retry(self, session_id: UUID) -> PlanningSession:
@@ -218,28 +225,47 @@ class PlanningRuntime:
                 }
             )
             self.repository.save_session(updated)
-        operation = (
-            self._run_generation(session_id)
-            if generate
-            else self._run_discovery(session_id)
-        )
-        self._schedule(session_id, operation)
+        if generate:
+            self._schedule(session_id, lambda: self._run_generation(session_id))
+        else:
+            self._schedule(session_id, lambda: self._run_discovery(session_id))
         return updated
 
     async def cancel(self, session_id: UUID) -> None:
-        """取消后台任务并持久化 cancelled 状态。"""
+        """取消未完成会话，并先持久化终态以阻止迟到任务覆盖。"""
 
-        task = self.tasks.get(session_id)
-        if task and not task.done():
+        async with self._lock(session_id):
+            session = self.get(session_id)
+            if session.status == "cancelled":
+                return
+            if session.status == "completed":
+                raise AppError("invalid_session_state", "已完成的行程不能取消", 409)
+            self.repository.save_session(
+                session.model_copy(update={"status": "cancelled", "updated_at": _now()})
+            )
+        await self._cancel_session_tasks(session_id)
+
+    async def close(self) -> None:
+        """停止并等待全部后台任务，为进程关闭释放运行时状态。"""
+
+        tasks = {
+            task
+            for session_tasks in self._session_tasks.values()
+            for task in session_tasks
+            if not task.done()
+        }
+        for task in tasks:
             task.cancel()
-        await self._set_session(session_id, status="cancelled")
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.tasks.clear()
+        self._session_tasks.clear()
+        self.locks.clear()
 
     async def _run_discovery(self, session_id: UUID) -> None:
         try:
             session = self.get(session_id)
-            result = await self.workflow.discover(
-                session.request, self._step_callback(session_id)
-            )
+            result = await self.workflow.discover(session.request, self._step_callback(session_id))
             warnings = _unique(
                 [
                     *result.get("outbound_warnings", []),
@@ -273,9 +299,7 @@ class PlanningRuntime:
             session = self.get(session_id)
             existing = self.travel_service.repository.get(session_id)
             if existing and existing.planning_session_id == session_id:
-                await self._set_session(
-                    session_id, status="completed", trip_id=existing.trip_id
-                )
+                await self._set_session(session_id, status="completed", trip_id=existing.trip_id)
                 return
             state = _generation_state(session, self._step_callback(session_id))
             itinerary = await self.workflow.generate(state)
@@ -315,6 +339,9 @@ class PlanningRuntime:
     async def _set_session(self, session_id: UUID, **values: Any) -> PlanningSession:
         async with self._lock(session_id):
             session = self.get(session_id)
+            # 取消是终态。迟到的发现或生成任务只能结束，不能把会话重新推进。
+            if session.status == "cancelled" and values.get("status") != "cancelled":
+                return session
             updated = session.model_copy(update={**values, "updated_at": _now()})
             self.repository.save_session(updated)
             return updated
@@ -323,38 +350,65 @@ class PlanningRuntime:
         code = error.code if isinstance(error, AppError) else "planning_failed"
         message = error.message if isinstance(error, AppError) else "规划任务执行失败，请重试"
         LOGGER.exception("planning_session_failed session_id=%s code=%s", session_id, code)
-        await self._set_session(
-            session_id, status="failed", error_code=code, error_message=message
-        )
+        await self._set_session(session_id, status="failed", error_code=code, error_message=message)
 
     def _schedule(
         self,
         session_id: UUID,
-        operation: Coroutine[Any, Any, None],
+        operation_factory: Callable[[], Coroutine[Any, Any, None]],
     ) -> None:
         existing = self.tasks.get(session_id)
         if existing and not existing.done():
+
             async def after_existing() -> None:
                 try:
-                    await existing
+                    await asyncio.shield(existing)
                 except asyncio.CancelledError:
-                    pass
-                await operation
+                    raise
+                except Exception:
+                    LOGGER.exception("planning_previous_task_failed session_id=%s", session_id)
+                await operation_factory()
 
             task = asyncio.create_task(after_existing())
         else:
-            task = asyncio.create_task(operation)
+            task = asyncio.create_task(operation_factory())
         self.tasks[session_id] = task
-        task.add_done_callback(
-            lambda completed: self._forget_task(session_id, completed)
-        )
+        self._session_tasks.setdefault(session_id, set()).add(task)
+        task.add_done_callback(lambda completed: self._forget_task(session_id, completed))
 
     def _forget_task(self, session_id: UUID, completed: asyncio.Task[Any]) -> None:
+        session_tasks = self._session_tasks.get(session_id)
+        if session_tasks is not None:
+            session_tasks.discard(completed)
+            if not session_tasks:
+                self._session_tasks.pop(session_id, None)
         if self.tasks.get(session_id) is completed:
             self.tasks.pop(session_id, None)
 
+    async def _cancel_session_tasks(self, session_id: UUID) -> None:
+        """取消同一会话的任务链，避免前置任务在取消后覆盖最终状态。"""
+
+        tasks = tuple(
+            task for task in self._session_tasks.get(session_id, set()) if not task.done()
+        )
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     def _lock(self, session_id: UUID) -> asyncio.Lock:
         return self.locks.setdefault(session_id, asyncio.Lock())
+
+
+def _task_factory(
+    runner: Callable[[UUID], Coroutine[Any, Any, None]], session_id: UUID
+) -> Callable[[], Coroutine[Any, Any, None]]:
+    """延迟创建恢复协程，避免任务被取消前留下未等待的 coroutine。"""
+
+    def operation() -> Coroutine[Any, Any, None]:
+        return runner(session_id)
+
+    return operation
 
 
 def _updated_step(
@@ -379,9 +433,7 @@ def _validate_selection(session: PlanningSession, selection: PlanningSelection) 
     ):
         raise AppError("invalid_selection", "酒店不在当前候选中", 422)
     if selection.outbound:
-        _validate_seat(
-            _find_option(outbound, selection.outbound.option_id), selection.outbound
-        )
+        _validate_seat(_find_option(outbound, selection.outbound.option_id), selection.outbound)
     if selection.return_trip:
         _validate_seat(
             _find_option(returns, selection.return_trip.option_id),

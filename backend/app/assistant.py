@@ -95,7 +95,6 @@ class TravelAssistantService:
         city_resolver: CityResolver,
         planning_runtime: PlanningStarter,
         command_generator: TravelCommandGenerator | None,
-        session_token_limit: int = 20_000,
     ) -> None:
         self._repository = repository
         self._conversations = conversations
@@ -103,7 +102,6 @@ class TravelAssistantService:
         self._planning_runtime = planning_runtime
         self._command_generator = command_generator
         self._context = TravelContextAssembler()
-        self._session_token_limit = session_token_limit
         self._locks: dict[UUID, asyncio.Lock] = {}
 
     def create(self) -> AssistantSessionView:
@@ -188,7 +186,6 @@ class TravelAssistantService:
                 state,
                 context,
                 memories,
-                self._session_token_limit - state.token_usage.total_tokens,
             )
             batch = generation.batch
 
@@ -230,9 +227,7 @@ class TravelAssistantService:
         if cached_response is not None:
             return cached_response
         manifest = (
-            generation.manifest
-            if generation
-            else self._context.build(state, context, memories)
+            generation.manifest if generation else self._context.build(state, context, memories)
         )
         await self._record_turn(
             request.content,
@@ -299,9 +294,7 @@ class TravelAssistantService:
     def _require_state(self, session_id: UUID) -> TravelDialogueState:
         state = self._repository.get_dialogue(session_id)
         if state is None:
-            raise AppError(
-                "assistant_session_not_found", "旅行助手会话不存在", 404
-            )
+            raise AppError("assistant_session_not_found", "旅行助手会话不存在", 404)
         return state
 
     @staticmethod
@@ -339,8 +332,7 @@ def _turn_metadata(
         summary_through=context.summarized_through_sequence,
         turn_seqs=tuple(turn.sequence for turn in context.recent_turns),
         memory_refs=tuple(
-            MemoryRef(id=f"travel:{item.key}", version=item.version)
-            for item in memories
+            MemoryRef(id=f"travel:{item.key}", version=item.version) for item in memories
         ),
         manifest=manifest.to_dict(),
     )
@@ -383,9 +375,7 @@ def _safe_model_metadata(raw: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _add_usage(
-    current: AssistantTokenUsage, added: AssistantTokenUsage
-) -> AssistantTokenUsage:
+def _add_usage(current: AssistantTokenUsage, added: AssistantTokenUsage) -> AssistantTokenUsage:
     """累加成功意图调用的供应商计量或保守估算。"""
 
     return AssistantTokenUsage(

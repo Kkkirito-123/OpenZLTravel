@@ -9,8 +9,9 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from app.errors import ConflictError, DraftError, ProviderError
+from app.errors import AppError, ConflictError, DraftError, ProviderError
 from app.models import (
+    City,
     DayActivityEdit,
     DayEditRequest,
     HotelDetail,
@@ -37,7 +38,7 @@ from app.providers.rail import RailProvider
 from app.runtime import PlanningRuntime
 from app.storage import SqliteTripRepository
 from app.travel import TravelService
-from app.workflow import WorkbenchWorkflow
+from app.workflow import WorkbenchWorkflow, _fetch_transport
 from tests.fakes import FakeMapProvider, FakePlanner
 
 
@@ -258,6 +259,42 @@ async def test_session_is_idempotent_and_saves_one_complete_trip(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_provider_executor_keeps_shared_query_when_owner_is_cancelled(
+    tmp_path: Path,
+) -> None:
+    """页面断开不应中断其他请求正在等待的同一供应商调用。"""
+
+    repository = SqliteTripRepository(str(tmp_path / "shared-query.sqlite3"))
+    executor = ProviderExecutor("rail", repository)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def operation() -> str:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return "ok"
+
+    owner = asyncio.create_task(executor.run("same", 60, operation))
+    await started.wait()
+    follower = asyncio.create_task(executor.run("same", 60, operation))
+    await asyncio.sleep(0)
+
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    assert "same" in executor.inflight
+
+    release.set()
+    assert await follower == ("ok", False)
+    await asyncio.sleep(0)
+    assert calls == 1
+    assert executor.inflight == {}
+
+
+@pytest.mark.asyncio
 async def test_selected_seat_price_enters_intercity_budget(tmp_path: Path) -> None:
     runtime, repository = make_runtime(tmp_path)
     session = runtime.start(planning_request())
@@ -285,6 +322,39 @@ async def test_selected_seat_price_enters_intercity_budget(tmp_path: Path) -> No
     assert itinerary.intercity.outbound and itinerary.intercity.outbound.price_from == 500
     assert itinerary.intercity.return_trip and itinerary.intercity.return_trip.price_from == 500
     assert itinerary.budget.intercity_transport == 2000
+
+
+@pytest.mark.asyncio
+async def test_selected_costs_are_checked_against_budget_after_aggregation(
+    tmp_path: Path,
+) -> None:
+    """真实车票报价进入总额后，预算超限提示必须基于最终金额。"""
+
+    runtime, repository = make_runtime(tmp_path)
+    request = planning_request().model_copy(update={"budget": 2500})
+    session = runtime.start(request)
+    discovered = await wait_for(runtime, session.session_id, "awaiting_selection")
+
+    await runtime.update_selection(
+        session.session_id,
+        PlanningSelection(
+            outbound=RailChoice(
+                option_id=discovered.outbound_options[0].option_id,
+                seat_type="一等座",
+            ),
+            return_trip=RailChoice(
+                option_id=discovered.return_options[0].option_id,
+                seat_type="一等座",
+            ),
+            hotel_id=discovered.hotel_options[0].hotel_id,
+        ),
+    )
+    await runtime.generate(session.session_id)
+    await wait_for(runtime, session.session_id, "completed")
+
+    itinerary = repository.get(session.session_id)
+    assert itinerary and itinerary.budget.total > request.budget
+    assert any("高于你的预算上限" in warning for warning in itinerary.warnings)
 
 
 @pytest.mark.asyncio
@@ -356,6 +426,65 @@ async def test_failed_weather_is_degraded_instead_of_failing_session(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_failed_transport_is_degraded_per_day() -> None:
+    """一日交通查询失败只能影响该日路线，不能让完整行程生成失败。"""
+
+    class FailedTransportMap:
+        async def get_transport_async(self, city, pois, mode):
+            del city, pois, mode
+            raise ProviderError("route_not_found", "路线服务暂时不可用")
+
+    pois = FakeMapProvider().candidates.attractions[:2]
+    result = await _fetch_transport(
+        FailedTransportMap(),
+        City(name="测试市"),
+        {1: pois},
+        "transit",
+    )
+
+    assert result[1].routes[0].mode == "步行估算"
+    assert result[1].warnings == ["公交路线暂时不可用，当前显示为本地步行估算。"]
+
+
+@pytest.mark.asyncio
+async def test_search_transfers_requires_selection_stage(tmp_path: Path) -> None:
+    """发现尚未完成时不能写入中转结果，避免被后台发现快照覆盖。"""
+
+    runtime, _ = make_runtime(tmp_path)
+    session = runtime.start(planning_request())
+
+    with pytest.raises(AppError, match="不能查询中转"):
+        await runtime.search_transfers(session.session_id, "outbound")
+
+    await runtime.cancel(session.session_id)
+    assert runtime.get(session.session_id).status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_completed_session_cannot_be_cancelled(tmp_path: Path) -> None:
+    """取消接口只能终止未完成会话，不能改写已保存行程的会话状态。"""
+
+    runtime, _ = make_runtime(tmp_path)
+    session = runtime.start(planning_request())
+    await wait_for(runtime, session.session_id, "awaiting_selection")
+    await runtime.update_selection(
+        session.session_id,
+        PlanningSelection(
+            self_arranged_outbound=True,
+            self_arranged_return=True,
+            self_arranged_hotel=True,
+        ),
+    )
+    await runtime.generate(session.session_id)
+    await wait_for(runtime, session.session_id, "completed")
+
+    with pytest.raises(AppError, match="不能取消"):
+        await runtime.cancel(session.session_id)
+
+    assert runtime.get(session.session_id).status == "completed"
+
+
+@pytest.mark.asyncio
 async def test_revision_conflict_prevents_stale_edit(tmp_path: Path) -> None:
     runtime, repository = make_runtime(tmp_path)
     session = runtime.start(planning_request())
@@ -393,6 +522,119 @@ async def test_revision_conflict_prevents_stale_edit(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_edits_commit_only_one_matching_revision(tmp_path: Path) -> None:
+    """两个浏览器同时提交同一版本时，SQLite 只能接受一个编辑。"""
+
+    class BlockingEditMap(AsyncMapProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.ready = asyncio.Event()
+            self.release = asyncio.Event()
+            self.calls = 0
+
+        async def get_transport_async(self, city, pois, mode):
+            self.calls += 1
+            if self.calls == 2:
+                self.ready.set()
+            await self.release.wait()
+            return TransportResult(local_routes(pois, mode), [])
+
+    runtime, repository = make_runtime(tmp_path)
+    session = runtime.start(planning_request())
+    discovered = await wait_for(runtime, session.session_id, "awaiting_selection")
+    await runtime.update_selection(
+        session.session_id,
+        PlanningSelection(
+            self_arranged_outbound=True,
+            self_arranged_return=True,
+            self_arranged_hotel=True,
+        ),
+    )
+    await runtime.generate(session.session_id)
+    await wait_for(runtime, session.session_id, "completed")
+    itinerary = repository.get(session.session_id)
+    assert itinerary
+    activity = itinerary.days[0].activities[0]
+    runtime.travel_service.map_provider = BlockingEditMap()
+
+    def edit(start_time: str) -> DayEditRequest:
+        return DayEditRequest(
+            expected_revision=1,
+            activities=[
+                DayActivityEdit(
+                    poi_id=activity.poi_id,
+                    start_time=start_time,
+                    duration_minutes=90,
+                )
+            ],
+        )
+
+    first = asyncio.create_task(
+        runtime.travel_service.edit_day(itinerary.trip_id, 1, edit("10:00"), discovered.candidates)
+    )
+    second = asyncio.create_task(
+        runtime.travel_service.edit_day(itinerary.trip_id, 1, edit("11:00"), discovered.candidates)
+    )
+    blocking_map = runtime.travel_service.map_provider
+    assert isinstance(blocking_map, BlockingEditMap)
+    await blocking_map.ready.wait()
+    blocking_map.release.set()
+    results = await asyncio.gather(first, second, return_exceptions=True)
+
+    assert sum(not isinstance(item, BaseException) for item in results) == 1
+    assert sum(isinstance(item, ConflictError) for item in results) == 1
+    stored = repository.get(itinerary.trip_id)
+    assert stored and stored.revision == 2
+
+
+@pytest.mark.asyncio
+async def test_runtime_close_cancels_all_pending_session_tasks(tmp_path: Path) -> None:
+    """关闭应用时不遗留发现任务，也不把半成品标记为失败。"""
+
+    class BlockingRailProvider(FakeRailProvider):
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def search(self, origin, destination, travel_date, direction):
+            self.started.set()
+            await self.release.wait()
+            return await super().search(origin, destination, travel_date, direction)
+
+    runtime, repository = make_runtime(tmp_path)
+    rail = BlockingRailProvider()
+    runtime.rail = rail
+    runtime.workflow.rail = rail
+    session = runtime.start(planning_request())
+    await rail.started.wait()
+
+    await runtime.close()
+
+    assert runtime.tasks == {}
+    assert runtime._session_tasks == {}
+    assert repository.get_session(session.session_id).status == "searching"  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_discovery_emits_one_terminal_event_for_each_successful_step(
+    tmp_path: Path,
+) -> None:
+    """步骤元数据应在唯一完成事件写入，不重复污染状态与日志。"""
+
+    runtime, _ = make_runtime(tmp_path)
+    events: list[tuple[str, str]] = []
+
+    async def on_step(name: str, status: str, **values) -> None:
+        del values
+        events.append((name, status))
+
+    await runtime.workflow.discover(planning_request(), on_step)
+
+    for step in ("rail_outbound", "rail_return", "hotels"):
+        assert events.count((step, "completed")) == 1
+
+
+@pytest.mark.asyncio
 async def test_rail_provider_merges_availability_and_prices(tmp_path: Path) -> None:
     repository = SqliteTripRepository(str(tmp_path / "cache.sqlite3"))
     client = FakeMcpClient()
@@ -426,6 +668,32 @@ async def test_rail_provider_surfaces_mcp_business_errors(tmp_path: Path) -> Non
 
     with pytest.raises(ProviderError, match="超出预售范围"):
         await provider.search("北京", "杭州", date(2026, 9, 1), "outbound")
+
+
+@pytest.mark.asyncio
+async def test_rail_provider_ignores_malformed_transfer_segments(tmp_path: Path) -> None:
+    """中转 MCP 混入非对象段时跳过该方案，不让解析异常中断整个发现阶段。"""
+
+    class MalformedTransferClient:
+        async def call_tool(self, name, arguments):
+            if name == "search-stations":
+                return {"stations": [{"code": "TST"}]}
+            if name == "query-transfer":
+                return {
+                    "transfers": [
+                        {"segments": [None, "bad"]},
+                        {"segments": None},
+                    ]
+                }
+            raise AssertionError(f"不应调用工具：{name}")
+
+    repository = SqliteTripRepository(str(tmp_path / "malformed-transfer.sqlite3"))
+    provider = RailProvider(MalformedTransferClient(), ProviderExecutor("rail", repository))
+
+    options, cache_hit = await provider.transfers("北京", "杭州", date(2026, 9, 1), "outbound")
+
+    assert options == []
+    assert cache_hit is False
 
 
 @pytest.mark.asyncio

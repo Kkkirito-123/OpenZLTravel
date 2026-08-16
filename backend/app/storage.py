@@ -9,6 +9,8 @@ from __future__ import annotations
 import builtins
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -34,6 +36,16 @@ class TripRepository(Protocol):
 
     def save(self, itinerary: Itinerary, request: TravelRequest) -> None:
         """保存请求与完整行程快照。"""
+
+        ...
+
+    def save_if_revision(
+        self,
+        itinerary: Itinerary,
+        request: TravelRequest,
+        expected_revision: int,
+    ) -> bool:
+        """仅当当前版本仍匹配时保存行程，返回是否成功提交。"""
 
         ...
 
@@ -161,11 +173,18 @@ class SqliteTripRepository:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._create_tables()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """开启一个短事务，并在成功或异常退出时显式关闭连接。"""
+
         connection = sqlite3.connect(self.database_path, timeout=5)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 5000")
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def _create_tables(self) -> None:
         with self._connect() as connection:
@@ -250,6 +269,7 @@ class SqliteTripRepository:
     def save(self, itinerary: Itinerary, request: TravelRequest) -> None:
         """保存完整快照；同一 ID 使用替换，便于后续支持重新生成。"""
 
+        values = _trip_values(itinerary, request)
         with self._connect() as connection:
             connection.execute(
                 """
@@ -258,17 +278,40 @@ class SqliteTripRepository:
                  request_json, itinerary_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    str(itinerary.trip_id),
-                    itinerary.destination,
-                    itinerary.start_date.isoformat(),
-                    itinerary.end_date.isoformat(),
-                    itinerary.summary,
-                    itinerary.created_at.isoformat(),
-                    request.model_dump_json(),
-                    itinerary.model_dump_json(),
-                ),
+                values,
             )
+
+    def save_if_revision(
+        self,
+        itinerary: Itinerary,
+        request: TravelRequest,
+        expected_revision: int,
+    ) -> bool:
+        """在同一写事务内比较版本并更新，避免并发编辑互相覆盖。"""
+
+        values = _trip_values(itinerary, request)
+        with self._connect() as connection:
+            # 版本字段在 JSON 内，不能依赖跨连接的“先读再写”。先取得写锁后再比较，
+            # 使两个同时提交的编辑只有一个可以看到旧版本。
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT itinerary_json FROM trips WHERE trip_id = ?", (values[0],)
+            ).fetchone()
+            if row is None:
+                return False
+            stored = Itinerary.model_validate_json(row["itinerary_json"])
+            if stored.revision != expected_revision:
+                return False
+            cursor = connection.execute(
+                """
+                UPDATE trips
+                SET destination = ?, start_date = ?, end_date = ?, summary = ?,
+                    created_at = ?, request_json = ?, itinerary_json = ?
+                WHERE trip_id = ?
+                """,
+                (*values[1:], values[0]),
+            )
+        return cursor.rowcount == 1
 
     def get(self, trip_id: UUID) -> Itinerary | None:
         """读取已保存的完整行程，不存在时返回空值。"""
@@ -525,9 +568,7 @@ class SqliteTripRepository:
         """删除一项长期偏好；现有会话快照不会被静默改写。"""
 
         with self._connect() as connection:
-            cursor = connection.execute(
-                "DELETE FROM travel_memories WHERE memory_key = ?", (key,)
-            )
+            cursor = connection.execute("DELETE FROM travel_memories WHERE memory_key = ?", (key,))
         return cursor.rowcount == 1
 
     def save_dialogue_response(
@@ -599,9 +640,7 @@ class SqliteTripRepository:
         """在消息事务内更新记忆，避免回复成功而偏好写入失败。"""
 
         for key in deletes:
-            connection.execute(
-                "DELETE FROM travel_memories WHERE memory_key = ?", (key,)
-            )
+            connection.execute("DELETE FROM travel_memories WHERE memory_key = ?", (key,))
         for key, value in upserts.items():
             connection.execute(
                 """
@@ -625,6 +664,21 @@ class SqliteTripRepository:
             )
 
 
+def _trip_values(itinerary: Itinerary, request: TravelRequest) -> tuple[str, ...]:
+    """统一生成行程表的持久化字段，避免普通保存与原子更新字段漂移。"""
+
+    return (
+        str(itinerary.trip_id),
+        itinerary.destination,
+        itinerary.start_date.isoformat(),
+        itinerary.end_date.isoformat(),
+        itinerary.summary,
+        itinerary.created_at.isoformat(),
+        request.model_dump_json(),
+        itinerary.model_dump_json(),
+    )
+
+
 class CatalogRepository:
     """读取离线公开数据目录，不与行程历史数据库混用。"""
 
@@ -639,10 +693,17 @@ class CatalogRepository:
 
         return self.database_path.is_file()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """打开只读目录事务，并保证查询结束后释放文件句柄。"""
+
         connection = sqlite3.connect(self.database_path)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def resolve_city(self, destination: str) -> City:
         """按城市名或 GeoNames 中文别名查找城市坐标。"""

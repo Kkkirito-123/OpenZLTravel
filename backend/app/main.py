@@ -4,6 +4,7 @@
 旅行规则位于 travel，外部协议位于 providers，路由层不编写业务判断。
 """
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -81,16 +82,17 @@ class ApplicationContainer:
         self.settings = settings or Settings()
         self.repository = SqliteTripRepository(self.settings.database_path)
         self.catalog = CatalogRepository(self.settings.catalog_path)
-        amap = AmapClient(self.settings, self.repository)
+        self.amap_client = AmapClient(self.settings, self.repository)
+        self.weather_client = OpenMeteoClient(self.settings, self.repository)
         scheduler = AmapScheduler(
             concurrency=self.settings.amap_scheduler_concurrency,
             min_interval_seconds=self.settings.amap_min_interval_seconds,
         )
         map_provider = HybridMapProvider(
             catalog=self.catalog,
-            upstream=amap,
+            upstream=self.amap_client,
             allow_amap_fallback=self.settings.allow_amap_fallback,
-            weather_provider=OpenMeteoClient(self.settings, self.repository),
+            weather_provider=self.weather_client,
             scheduler=scheduler,
         )
         self.travel = TravelService(map_provider, LlmPlanner(self.settings), self.repository)
@@ -166,12 +168,8 @@ class ApplicationContainer:
                 self.settings.intent_llm_timeout_seconds,
                 cache=self.repository,
                 cache_ttl_seconds=self.settings.intent_result_cache_ttl_seconds,
-                cache_namespace=(
-                    f"{self.settings.llm_base_url}|{self.settings.llm_model}"
-                ),
+                cache_namespace=(f"{self.settings.llm_base_url}|{self.settings.llm_model}"),
                 max_context_chars=self.settings.intent_context_max_chars,
-                max_input_tokens=self.settings.intent_max_input_tokens,
-                max_output_tokens=self.settings.intent_max_output_tokens,
             )
             if intent_model
             else None
@@ -182,8 +180,8 @@ class ApplicationContainer:
             self.catalog,
             self.runtime,
             generator,
-            self.settings.intent_session_token_limit,
         )
+        self._closed = False
 
     def _executor(self, provider: str) -> ProviderExecutor:
         return ProviderExecutor(
@@ -210,7 +208,6 @@ class ApplicationContainer:
             api_key=self.settings.llm_api_key,
             timeout_seconds=self.settings.intent_llm_timeout_seconds,
             temperature=0,
-            max_tokens=self.settings.intent_max_output_tokens,
             transport=transport,
         )
 
@@ -224,13 +221,9 @@ class ApplicationContainer:
             "rail_mcp": "configured" if self.settings.rail_mcp_url else "missing",
             "hotel_provider": self._hotel_readiness(),
             "intent_model": (
-                "configured"
-                if self.settings.llm_api_key and self.settings.llm_model
-                else "missing"
+                "configured" if self.settings.llm_api_key and self.settings.llm_model else "missing"
             ),
-            "prompt_cache": (
-                "configured" if self.settings.intent_prompt_cache_key else "disabled"
-            ),
+            "prompt_cache": ("configured" if self.settings.intent_prompt_cache_key else "disabled"),
         }
 
     def _hotel_readiness(self) -> str:
@@ -239,10 +232,24 @@ class ApplicationContainer:
         return "dida_token"
 
     async def close(self) -> None:
-        """关闭 MCP 会话和连接池，避免开发热重载留下失效会话。"""
+        """按依赖逆序停止任务并关闭全部网络与会话资源。"""
 
-        for client in self.provider_clients:
-            await client.aclose()
+        if self._closed:
+            return
+        self._closed = True
+        await self.runtime.close()
+        results = await asyncio.gather(
+            *(client.aclose() for client in self.provider_clients),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, Exception):
+                LOGGER.warning("provider_client_close_failed", exc_info=result)
+        for client in (self.amap_client, self.weather_client):
+            try:
+                client.close()
+            except Exception:
+                LOGGER.exception("map_client_close_failed")
         self.conversation_store.close()
 
 
@@ -281,6 +288,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await container.close()
+        # 测试或热重载后的下一次 lifespan 必须得到新的、未关闭的容器。
+        get_container.cache_clear()
 
 
 app = FastAPI(title="OpenZLTravel", version="0.5.0", lifespan=lifespan)

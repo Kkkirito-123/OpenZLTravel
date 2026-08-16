@@ -32,6 +32,7 @@ from app.providers import (
     HotelProvider,
     RailProvider,
     TransportResult,
+    local_routes,
 )
 
 StepCallback = Callable[..., Awaitable[None]]
@@ -162,9 +163,7 @@ class TravelWorkflow:
         """把草稿转换成按天的真实 POI 序列。"""
 
         return {
-            "transport_requirements": _transport_requirements(
-                state["draft"], state["candidates"]
-            )
+            "transport_requirements": _transport_requirements(state["draft"], state["candidates"])
         }
 
     async def fetch_transport(self, state: TravelState) -> Mapping[str, Any]:
@@ -218,9 +217,7 @@ class WorkbenchWorkflow:
         self.discovery_graph = self._build_discovery_graph()
         self.generation_graph = self._build_generation_graph()
 
-    async def discover(
-        self, request: PlanningRequest, on_step: StepCallback
-    ) -> DiscoveryState:
+    async def discover(self, request: PlanningRequest, on_step: StepCallback) -> DiscoveryState:
         """并行发现车票、酒店、天气和本地 POI。"""
 
         result = await self.discovery_graph.ainvoke({"request": request, "on_step": on_step})
@@ -299,19 +296,24 @@ class WorkbenchWorkflow:
         direction: str,
     ) -> Mapping[str, Any]:
         step_name = f"rail_{direction}"
-        try:
-            options, cache_hit = await _step(
-                state,
-                step_name,
-                lambda: self.rail.search(origin, destination, travel_date, direction),
-            )
+
+        async def operation() -> tuple[list[RailOption], list[RailOption], bool]:
+            options, cache_hit = await self.rail.search(origin, destination, travel_date, direction)
             transfers: list[RailOption] = []
             if not options:
                 transfers, transfer_hit = await self.rail.transfers(
                     origin, destination, travel_date, direction
                 )
                 cache_hit = cache_hit or transfer_hit
-            await state["on_step"](step_name, "completed", cache_hit=cache_hit)
+            return options, transfers, cache_hit
+
+        try:
+            options, transfers, _ = await _step(
+                state,
+                step_name,
+                operation,
+                completed_values=lambda result: {"cache_hit": result[2]},
+            )
             prefix = "outbound" if direction == "outbound" else "return"
             return {f"{prefix}_options": options, f"{prefix}_transfers": transfers}
         except ProviderError as error:
@@ -325,9 +327,7 @@ class WorkbenchWorkflow:
             return {
                 f"{prefix}_options": [],
                 f"{prefix}_transfers": [],
-                f"{prefix}_warnings": [
-                    "12306 车次查询暂时不可用，请自行确认往返交通。"
-                ],
+                f"{prefix}_warnings": ["12306 车次查询暂时不可用，请自行确认往返交通。"],
             }
 
     async def _fetch_hotels(self, state: DiscoveryState) -> Mapping[str, Any]:
@@ -335,13 +335,16 @@ class WorkbenchWorkflow:
             await state["on_step"]("hotels", "completed", message="一日行程无需住宿")
             return {"hotel_options": [], "hotel_warnings": []}
         try:
-            options, cache_hit, warning = await _step(
+            options, _, warning = await _step(
                 state,
                 "hotels",
                 lambda: self.hotels.search(state["request"], state["candidates"]),
+                completed_values=lambda result: {
+                    "status": "degraded" if result[2] else "completed",
+                    "cache_hit": result[1],
+                    "message": result[2],
+                },
             )
-            status = "degraded" if warning else "completed"
-            await state["on_step"]("hotels", status, cache_hit=cache_hit, message=warning)
             return {"hotel_options": options, "hotel_warnings": [warning] if warning else []}
         except ProviderError as error:
             await state["on_step"](
@@ -384,18 +387,14 @@ class WorkbenchWorkflow:
                 state["candidates"],
                 state["intercity"].outbound,
                 state["intercity"].return_trip,
-                state["accommodation"].hotel.hotel_id
-                if state["accommodation"].hotel
-                else None,
+                state["accommodation"].hotel.hotel_id if state["accommodation"].hotel else None,
             ),
         )
         return {"draft": draft}
 
     async def _generation_requirements(self, state: GenerationState) -> Mapping[str, Any]:
         return {
-            "transport_requirements": _transport_requirements(
-                state["draft"], state["candidates"]
-            )
+            "transport_requirements": _transport_requirements(state["draft"], state["candidates"])
         }
 
     async def _enhance_copy(self, state: GenerationState) -> Mapping[str, Any]:
@@ -420,9 +419,7 @@ class WorkbenchWorkflow:
             )
             return {"draft": draft}
         except (AppError, asyncio.TimeoutError):
-            await state["on_step"](
-                "copy", "degraded", message="文案增强不可用，已使用确定性模板"
-            )
+            await state["on_step"]("copy", "degraded", message="文案增强不可用，已使用确定性模板")
             return {"draft": state["draft"]}
 
     async def _generation_transport(self, state: GenerationState) -> Mapping[str, Any]:
@@ -467,8 +464,9 @@ async def _step(
     state: Any,
     name: str,
     operation: Callable[[], Awaitable[Any]],
+    completed_values: Callable[[Any], Mapping[str, Any]] | None = None,
 ) -> Any:
-    """记录步骤起止时间，业务节点只关心自己的输入输出。"""
+    """记录步骤起止时间，并在一次完成事件中写入可展示元数据。"""
 
     callback = state["on_step"]
     await callback(name, "running")
@@ -478,7 +476,14 @@ async def _step(
     except Exception:
         await callback(name, "failed", duration_ms=_elapsed_ms(started))
         raise
-    await callback(name, "completed", duration_ms=_elapsed_ms(started))
+    values = dict(completed_values(result)) if completed_values else {}
+    completed_status = values.pop("status", "completed")
+    await callback(
+        name,
+        completed_status,
+        duration_ms=_elapsed_ms(started),
+        **values,
+    )
     return result
 
 
@@ -502,16 +507,36 @@ async def _fetch_transport(
     mode: str,
 ) -> dict[int, TransportResult]:
     async def one(index: int, pois: list[Poi]) -> tuple[int, TransportResult]:
-        result = await _call_provider(provider, "get_transport_async", None, city, pois, mode)
+        try:
+            result = await _call_provider(provider, "get_transport_async", None, city, pois, mode)
+        except ProviderError:
+            result = _local_transport_fallback(pois, mode)
         return index, result
 
     results = await asyncio.gather(*(one(index, pois) for index, pois in requirements.items()))
     return dict(results)
 
 
-async def _call_provider(
-    provider: Any, async_name: str, sync_name: str | None, *args: Any
-) -> Any:
+def _local_transport_fallback(pois: list[Poi], mode: str) -> TransportResult:
+    """实时交通失败时退回明确标注的本地估算，不伪造道路或公交事实。"""
+
+    if mode == "transit":
+        return TransportResult(
+            local_routes(pois, "walk"),
+            ["公交路线暂时不可用，当前显示为本地步行估算。"],
+        )
+    if mode == "realtime_driving":
+        return TransportResult(
+            local_routes(pois, "driving"),
+            ["实时驾车路线暂时不可用，当前显示为本地驾车估算。"],
+        )
+    return TransportResult(
+        local_routes(pois, mode),
+        ["市内路线暂时不可用，当前显示为本地路线估算。"],
+    )
+
+
+async def _call_provider(provider: Any, async_name: str, sync_name: str | None, *args: Any) -> Any:
     operation = getattr(provider, async_name, None)
     if operation is not None:
         return await operation(*args)
