@@ -183,17 +183,20 @@ def _direct_option(
 
 
 def _transfer_options(payload: Any, direction: str, travel_date: date) -> list[RailOption]:
-    return [
-        _transfer_option(item, direction, travel_date, index)
-        for index, item in enumerate(_items(payload, "transfers"))
-        if isinstance(item.get("segments"), list) and item["segments"]
-    ]
+    options: list[RailOption] = []
+    for index, item in enumerate(_items(payload, "transfers")):
+        option = _transfer_option(item, direction, travel_date, index)
+        if option is not None:
+            options.append(option)
+    return options
 
 
 def _transfer_option(
     item: dict[str, Any], direction: str, travel_date: date, index: int
-) -> RailOption:
-    segments = [_segment(value) for value in item.get("segments", []) if isinstance(value, dict)]
+) -> RailOption | None:
+    segments = [_segment(value) for value in _items(item, "segments")]
+    if not segments:
+        return None
     first, last = segments[0], segments[-1]
     code = " + ".join(segment.train_code for segment in segments)
     seats = _combined_transfer_seats(segments)
@@ -220,8 +223,8 @@ def _quoted_transfer(option: RailOption, payloads: list[Any]) -> RailOption:
     """把各段真实报价写回中转方案；缺失任一段时总价保持未知。"""
 
     segments = [
-        _quote_segment(segment, payload)
-        for segment, payload in zip(option.segments, payloads, strict=False)
+        _quote_segment(segment, payloads[index] if index < len(payloads) else None)
+        for index, segment in enumerate(option.segments)
     ]
     seats = _combined_transfer_seats(segments)
     return option.model_copy(
@@ -305,6 +308,8 @@ def _seats(value: Any, prices: dict[str, Any]) -> list[RailSeat]:
 
 def _items(payload: Any, key: str) -> list[dict[str, Any]]:
     values = payload.get(key, []) if isinstance(payload, dict) else []
+    if not isinstance(values, list):
+        return []
     return [item for item in values if isinstance(item, dict)]
 
 

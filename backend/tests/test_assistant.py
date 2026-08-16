@@ -62,7 +62,6 @@ class AssistantEnvironment:
         *responses: str,
         delay: float = 0,
         configured: bool = True,
-        token_limit: int = 20_000,
     ) -> None:
         self.repository = SqliteTripRepository(str(database))
         self.conversation_store = SqliteConversationStore(database)
@@ -76,7 +75,6 @@ class AssistantEnvironment:
             FakeCityResolver(),
             self.runtime,
             generator,
-            token_limit,
         )
 
     def close(self) -> None:
@@ -117,14 +115,12 @@ async def test_complete_message_starts_one_planning_session(tmp_path: Path) -> N
         assert response.planning_session_id == PLANNING_ID
         assert response.missing_slots == []
         assert len(environment.runtime.calls) == 1
-        assert environment.runtime.calls[0][1] == (
-            f"assistant:{session.state.session_id}:1"
-        )
+        assert environment.runtime.calls[0][1] == (f"assistant:{session.state.session_id}:1")
         assert restored.state.planning_session_id == PLANNING_ID
         assert restored.turns[0].user_content == request.content
-        metadata = environment.conversation_store.list_turns(
-            str(session.state.session_id)
-        )[0].metadata
+        metadata = environment.conversation_store.list_turns(str(session.state.session_id))[
+            0
+        ].metadata
         segments = metadata["context_ref"]["manifest"]["segments"]
         assert all("content" not in segment for segment in segments)
     finally:
@@ -202,9 +198,7 @@ async def test_discovery_uses_llm_then_fast_parser(tmp_path: Path) -> None:
 async def test_explicit_memory_survives_new_session_and_can_be_forgotten(
     tmp_path: Path,
 ) -> None:
-    environment = AssistantEnvironment(
-        tmp_path / "memory.sqlite3", configured=False
-    )
+    environment = AssistantEnvironment(tmp_path / "memory.sqlite3", configured=False)
     try:
         first_id = environment.service.create().state.session_id
         remembered = await environment.service.send(
@@ -233,9 +227,7 @@ async def test_explicit_memory_survives_new_session_and_can_be_forgotten(
 
 @pytest.mark.asyncio
 async def test_context_ref_records_memory_version_without_body(tmp_path: Path) -> None:
-    environment = AssistantEnvironment(
-        tmp_path / "memory-ref.sqlite3", DISCOVERY_COMMAND
-    )
+    environment = AssistantEnvironment(tmp_path / "memory-ref.sqlite3", DISCOVERY_COMMAND)
     try:
         first = environment.service.create().state.session_id
         await environment.service.send(
@@ -252,29 +244,6 @@ async def test_context_ref_records_memory_version_without_body(tmp_path: Path) -
         refs = metadata["context_ref"]["memory_refs"]
         assert refs == [{"id": "travel:origin", "version": 1}]
         assert "杭州" not in str(refs)
-    finally:
-        environment.close()
-
-
-@pytest.mark.asyncio
-async def test_session_token_limit_rejects_model_before_call(tmp_path: Path) -> None:
-    environment = AssistantEnvironment(
-        tmp_path / "token-limit.sqlite3",
-        DISCOVERY_COMMAND,
-        token_limit=1,
-    )
-    try:
-        session_id = environment.service.create().state.session_id
-
-        with pytest.raises(AppError) as caught:
-            await environment.service.send(
-                session_id,
-                AssistantMessageRequest(message_id=uuid4(), content="我想去广西玩"),
-            )
-
-        assert caught.value.code == "intent_budget_exceeded"
-        assert environment.model.calls == []
-        assert environment.repository.get_dialogue(session_id).revision == 0  # type: ignore[union-attr]
     finally:
         environment.close()
 
@@ -305,9 +274,7 @@ async def test_model_failure_does_not_change_state(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_unconfigured_model_uses_stable_error(tmp_path: Path) -> None:
-    environment = AssistantEnvironment(
-        tmp_path / "unconfigured.sqlite3", configured=False
-    )
+    environment = AssistantEnvironment(tmp_path / "unconfigured.sqlite3", configured=False)
     try:
         session_id = environment.service.create().state.session_id
 
@@ -417,9 +384,7 @@ async def test_assistant_api_create_send_and_restore(tmp_path: Path) -> None:
     app.dependency_overrides[get_assistant_service] = lambda: environment.service
     transport = httpx.ASGITransport(app=app)
     try:
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             created = await client.post("/api/assistant-sessions")
             session_id = created.json()["state"]["session_id"]
             sent = await client.post(
@@ -447,9 +412,7 @@ async def test_assistant_api_returns_stable_not_found_error(tmp_path: Path) -> N
     app.dependency_overrides[get_assistant_service] = lambda: environment.service
     transport = httpx.ASGITransport(app=app)
     try:
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             response = await client.get(f"/api/assistant-sessions/{uuid4()}")
 
         assert response.status_code == 404
@@ -463,9 +426,7 @@ async def test_assistant_api_returns_stable_not_found_error(tmp_path: Path) -> N
 async def test_assistant_memory_api_lists_and_deletes_explicit_memory(
     tmp_path: Path,
 ) -> None:
-    environment = AssistantEnvironment(
-        tmp_path / "memory-api.sqlite3", configured=False
-    )
+    environment = AssistantEnvironment(tmp_path / "memory-api.sqlite3", configured=False)
     session_id = environment.service.create().state.session_id
     await environment.service.send(
         session_id,
@@ -474,9 +435,7 @@ async def test_assistant_memory_api_lists_and_deletes_explicit_memory(
     app.dependency_overrides[get_assistant_service] = lambda: environment.service
     transport = httpx.ASGITransport(app=app)
     try:
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             listed = await client.get("/api/assistant-memories")
             deleted = await client.delete("/api/assistant-memories/origin")
             empty = await client.get("/api/assistant-memories")

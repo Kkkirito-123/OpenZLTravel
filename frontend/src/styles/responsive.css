@@ -1,0 +1,286 @@
+@media (max-width: 960px) {
+  .chat-layout {
+    grid-template-columns: minmax(0, 1fr) 248px;
+  }
+
+  .progress-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .step-status:nth-child(3) {
+    border-right: 0;
+  }
+
+  .step-status:nth-child(n + 4) {
+    border-top: 1px solid var(--line);
+  }
+
+  .journey-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .journey-strip article {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .journey-strip article:last-child {
+    border-bottom: 0;
+  }
+
+  .result-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .result-sidebar {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  body {
+    font-size: 16px;
+  }
+
+  h1 {
+    font-size: 28px;
+  }
+
+  .topbar {
+    padding: 0 14px;
+  }
+
+  .brand small {
+    display: none;
+  }
+
+  .nav-links a {
+    padding: 0 8px;
+    font-size: 13px;
+  }
+
+  .page-content {
+    padding: 24px 14px 56px;
+  }
+
+  .chat-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .chat-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .conversation-panel {
+    grid-template-rows: minmax(240px, 1fr) auto auto;
+    min-height: calc(100dvh - 270px);
+  }
+
+  .chat-messages {
+    max-height: calc(100dvh - 380px);
+    padding: 18px 14px;
+  }
+
+  .message-bubble {
+    max-width: 86%;
+  }
+
+  .chat-composer {
+    padding: 12px;
+  }
+
+  .composer-actions .primary-button {
+    min-width: 112px;
+  }
+
+  .requirements-panel {
+    padding: 16px 14px;
+  }
+
+  .chat-error {
+    align-items: flex-start;
+  }
+
+  .workspace-heading,
+  .result-header,
+  .result-heading,
+  .day-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .stepper {
+    width: 100%;
+  }
+
+  .stepper li {
+    flex: 1;
+    justify-content: center;
+    padding: 0 4px;
+  }
+
+  .two-columns,
+  .three-columns,
+  .result-sidebar {
+    grid-template-columns: 1fr;
+  }
+
+  .form-section {
+    padding: 18px 14px;
+  }
+
+  .form-footer,
+  .selection-footer {
+    align-items: stretch;
+    flex-direction: column;
+    padding: 14px;
+  }
+
+  .form-footer .primary-button,
+  .selection-footer .primary-button {
+    width: 100%;
+  }
+
+  .progress-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .step-status,
+  .step-status:nth-child(3) {
+    border-top: 1px solid var(--line);
+    border-right: 0;
+  }
+
+  .step-status:first-child {
+    border-top: 0;
+  }
+
+  .section-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .segmented-control {
+    width: 100%;
+  }
+
+  .filter-bar select {
+    flex: 1 1 140px;
+  }
+
+  .hotel-row {
+    grid-template-columns: 84px minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .hotel-thumb {
+    width: 84px;
+    height: 84px;
+  }
+
+  .hotel-price {
+    grid-column: 1 / -1;
+    align-items: flex-start;
+    padding-top: 10px;
+    border-top: 1px solid var(--line);
+  }
+
+  .hotel-price > div {
+    width: 100%;
+  }
+
+  .hotel-price .select-button {
+    flex: 1;
+  }
+
+  .day-panel {
+    padding: 16px 14px;
+  }
+
+  .day-actions,
+  .header-actions {
+    width: 100%;
+  }
+
+  .day-actions > *,
+  .header-actions > * {
+    flex: 1;
+  }
+
+  .timeline-item {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .place-row {
+    grid-template-columns: 1fr;
+  }
+
+  .spot-image {
+    width: 100%;
+    height: 160px;
+  }
+
+  .trip-map {
+    height: 220px;
+  }
+
+  .detail-drawer {
+    width: 100%;
+    padding: 24px 16px;
+  }
+
+  .edit-row {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .edit-fields {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .edit-fields label:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .edit-actions {
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(3, 44px);
+    justify-content: end;
+  }
+}
+
+@media (max-width: 420px) {
+  .topbar {
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 8px 10px 0;
+  }
+
+  .brand {
+    min-height: 44px;
+  }
+
+  .nav-links {
+    width: 100%;
+    border-top: 1px solid var(--line);
+  }
+
+  .nav-links a {
+    flex: 1;
+    justify-content: center;
+    min-width: 0;
+    padding: 0 4px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

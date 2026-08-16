@@ -5,6 +5,7 @@ from datetime import date
 from pathlib import Path
 
 import httpx
+import pytest
 
 from app.config import Settings
 from app.errors import ProviderError
@@ -98,14 +99,13 @@ def test_open_meteo_failure_falls_back_to_amap_weather() -> None:
     assert upstream.weather_calls == 1
 
 
-def test_local_driving_does_not_call_amap() -> None:
+@pytest.mark.asyncio
+async def test_local_driving_does_not_call_amap() -> None:
     upstream = CountingMapProvider()
     provider = HybridMapProvider(EmptyCatalog(), upstream)
 
-    result = asyncio.run(
-        provider.get_transport_async(
-            City(name="测试市"), [poi("a1"), poi("a2", 30.2, 120.2)], "driving"
-        )
+    result = await provider.get_transport_async(
+        City(name="测试市"), [poi("a1"), poi("a2", 30.2, 120.2)], "driving"
     )
 
     assert result.routes[0].source and result.routes[0].source.provider == "local_estimate"
@@ -113,34 +113,33 @@ def test_local_driving_does_not_call_amap() -> None:
     assert upstream.route_calls == 0
 
 
-def test_realtime_driving_uses_one_waypoint_request() -> None:
+@pytest.mark.asyncio
+async def test_realtime_driving_uses_one_waypoint_request() -> None:
     upstream = CountingMapProvider()
     provider = HybridMapProvider(EmptyCatalog(), upstream)
     points = [poi("a1"), poi("a2", 30.2, 120.2), poi("a3", 30.3, 120.3)]
 
-    result = asyncio.run(
-        provider.get_transport_async(City(name="测试市"), points, "realtime_driving")
-    )
+    result = await provider.get_transport_async(City(name="测试市"), points, "realtime_driving")
 
     assert result.routes[0].via_poi_ids == ["a2"]
     assert upstream.waypoint_calls == 1
 
 
-def test_transit_failure_falls_back_to_local_estimate() -> None:
+@pytest.mark.asyncio
+async def test_transit_failure_falls_back_to_local_estimate() -> None:
     upstream = CountingMapProvider(transit_error=True)
     provider = HybridMapProvider(EmptyCatalog(), upstream)
 
-    result = asyncio.run(
-        provider.get_transport_async(
-            City(name="测试市"), [poi("a1"), poi("a2", 30.2, 120.2)], "transit"
-        )
+    result = await provider.get_transport_async(
+        City(name="测试市"), [poi("a1"), poi("a2", 30.2, 120.2)], "transit"
     )
 
     assert result.routes[0].mode == "步行估算"
     assert "公交路线暂时不可用" in result.warnings[0]
 
 
-def test_scheduler_deduplicates_concurrent_requests() -> None:
+@pytest.mark.asyncio
+async def test_scheduler_deduplicates_concurrent_requests() -> None:
     scheduler = AmapScheduler(concurrency=2, min_interval_seconds=0)
     calls = 0
 
@@ -150,14 +149,86 @@ def test_scheduler_deduplicates_concurrent_requests() -> None:
         await asyncio.sleep(0.01)
         return "ok"
 
-    async def run() -> list[str]:
-        return await asyncio.gather(*[scheduler.run("same", operation) for _ in range(5)])
-
-    assert asyncio.run(run()) == ["ok"] * 5
+    assert await asyncio.gather(*[scheduler.run("same", operation) for _ in range(5)]) == ["ok"] * 5
     assert calls == 1
 
 
-def test_langgraph_workflow_saves_once_after_validation(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_scheduler_keeps_shared_request_when_owner_is_cancelled() -> None:
+    """取消一个页面请求不能取消其他页面正在等待的同一高德查询。"""
+
+    scheduler = AmapScheduler(concurrency=1, min_interval_seconds=0)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def operation() -> str:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return "ok"
+
+    owner = asyncio.create_task(scheduler.run("same", operation))
+    await started.wait()
+    follower = asyncio.create_task(scheduler.run("same", operation))
+    await asyncio.sleep(0)
+
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    assert "same" in scheduler.inflight
+
+    release.set()
+    assert await follower == "ok"
+    await asyncio.sleep(0)
+    assert calls == 1
+    assert scheduler.inflight == {}
+
+
+@pytest.mark.asyncio
+async def test_local_catalog_skips_amap_scheduler_for_city_and_candidates() -> None:
+    """公开目录命中时不应为高德调度间隔额外等待。"""
+
+    class LocalCatalog:
+        available = True
+
+        def resolve_city(self, destination: str) -> City:
+            assert destination == "测试市"
+            return City(name="测试市", latitude=30.1, longitude=120.1)
+
+        def search_candidates(self, city: City):
+            assert city.name == "测试市"
+            return sample_catalog()
+
+    class UnexpectedUpstream(FakeMapProvider):
+        def resolve_city(self, destination: str) -> City:
+            raise AssertionError(f"不应请求高德城市查询：{destination}")
+
+        def search_candidates(self, city: City):
+            raise AssertionError(f"不应请求高德 POI 查询：{city.name}")
+
+    class CountingScheduler(AmapScheduler):
+        def __init__(self) -> None:
+            super().__init__(min_interval_seconds=0)
+            self.calls = 0
+
+        async def run(self, *args, **kwargs):
+            self.calls += 1
+            return await super().run(*args, **kwargs)
+
+    scheduler = CountingScheduler()
+    provider = HybridMapProvider(LocalCatalog(), UnexpectedUpstream(), scheduler=scheduler)
+
+    city = await provider.resolve_city_async("测试市")
+    candidates = await provider.search_candidates_async(city)
+
+    assert candidates.attractions
+    assert scheduler.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_langgraph_workflow_saves_once_after_validation(tmp_path: Path) -> None:
     provider = AsyncLocalProvider()
     service = TravelService(
         provider,
@@ -165,7 +236,7 @@ def test_langgraph_workflow_saves_once_after_validation(tmp_path: Path) -> None:
         SqliteTripRepository(str(tmp_path / "trips.sqlite3")),
     )
 
-    result = asyncio.run(service.create_async(sample_request()))
+    result = await service.create_async(sample_request())
 
     assert result.days[0].routes == []
     assert len(service.list()) == 1

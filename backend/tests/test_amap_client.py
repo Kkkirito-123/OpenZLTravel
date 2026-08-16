@@ -98,6 +98,26 @@ def test_empty_weather_response_is_safe() -> None:
     assert client.get_weather(City(name="测试市"), date(2026, 9, 1), date(2026, 9, 1)) == []
 
 
+def test_malformed_weather_items_are_ignored() -> None:
+    client = AmapClient(Settings(amap_api_key="test"))
+    client._get = lambda path, **params: {
+        "status": "1",
+        "forecasts": [
+            {
+                "casts": [
+                    "not-an-object",
+                    {"date": "invalid"},
+                    {"date": "2026-09-01", "dayweather": "晴", "nightweather": "多云"},
+                ]
+            }
+        ],
+    }
+
+    weather = client.get_weather(City(name="测试市"), date(2026, 9, 1), date(2026, 9, 1))
+
+    assert [item.date for item in weather] == [date(2026, 9, 1)]
+
+
 def test_route_parser_keeps_real_coordinates() -> None:
     client = AmapClient(Settings(amap_api_key="test"))
     client._get = lambda path, **params: {
@@ -122,6 +142,45 @@ def test_route_parser_keeps_real_coordinates() -> None:
     latitude, longitude = _gcj02_to_wgs84(30.1, 120.1)
     assert route.polyline[0].latitude == pytest.approx(latitude)
     assert route.polyline[0].longitude == pytest.approx(longitude)
+
+
+def test_malformed_route_metrics_use_stable_error() -> None:
+    client = AmapClient(Settings(amap_api_key="test"))
+    client._get = lambda path, **params: {
+        "status": "1",
+        "route": {"paths": [{"distance": "unknown", "duration": None, "steps": [None]}]},
+    }
+    from_poi = Poi(id="p1", name="起点", category="attraction", latitude=30.1, longitude=120.1)
+    to_poi = Poi(id="p2", name="终点", category="attraction", latitude=30.2, longitude=120.2)
+
+    with pytest.raises(ProviderError) as error:
+        client.get_route(from_poi, to_poi)
+
+    assert error.value.code == "route_not_found"
+
+
+def test_transit_parser_ignores_malformed_nested_fields() -> None:
+    client = AmapClient(Settings(amap_api_key="test"))
+    client._get = lambda path, **params: {
+        "status": "1",
+        "route": {
+            "transits": [
+                {
+                    "distance": "1200",
+                    "duration": "900",
+                    "segments": [{"walking": "bad", "bus": {"buslines": [None, "bad"]}}],
+                }
+            ]
+        },
+    }
+    from_poi = Poi(id="p1", name="起点", category="attraction", latitude=30.1, longitude=120.1)
+    to_poi = Poi(id="p2", name="终点", category="attraction", latitude=30.2, longitude=120.2)
+
+    route = client.get_transit(City(name="测试市"), from_poi, to_poi)
+
+    assert route.distance_km == 1.2
+    assert route.transit_lines == []
+    assert route.polyline == []
 
 
 def test_missing_route_path_uses_stable_error() -> None:
@@ -167,6 +226,25 @@ def test_rate_limit_is_converted_to_stable_error(tmp_path) -> None:
     assert "频率限制" in error.value.message
     assert second_error.value.code == "amap_rate_limited"
     assert calls == 1
+
+
+def test_non_object_amap_response_uses_stable_error() -> None:
+    client = AmapClient(Settings(amap_api_key="test"))
+
+    class InvalidHttp:
+        def get(self, *args, **kwargs):
+            return httpx.Response(
+                200,
+                request=httpx.Request("GET", "https://example.test"),
+                json=["invalid"],
+            )
+
+    client.http = InvalidHttp()
+
+    with pytest.raises(ProviderError) as error:
+        client._get("/place/text", city="杭州", keywords="景点")
+
+    assert error.value.code == "amap_invalid_response"
 
 
 def test_successful_response_is_reused_from_disk(tmp_path) -> None:

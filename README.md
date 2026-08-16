@@ -34,7 +34,7 @@ SQLite 保存完整行程
 - 支持可刷新恢复的多轮对话；聊天模型只能设置受控旅行槽位，不能直接调用工具。
 - 当前消息、权威状态、待回答字段、Skill 契约、长期偏好、最近完整轮次和滚动摘要组成专属上下文。
 - 用户明确说“记住/忘记”时，保存或删除跨会话稳定偏好；当前明确输入始终优先。
-- 意图模型使用单次硬上限和每会话累计 Token 预算，前端展示成功调用的累计用量。
+- 意图模型不设置生成 Token 或会话累计 Token 硬上限，前端只记录成功调用的实际或估算用量。
 - 相同意图提示先读 SQLite 精确结果缓存；同一进程的并发请求只产生一次模型调用。
 - “省域推荐”和“周边推荐”先收集结构化需求，不生成缺少数据支持的城市结论。
 - 具体城市、日期和预算完整后，以消息版本作为幂等键创建一次现有规划会话。
@@ -58,18 +58,27 @@ SQLite 保存完整行程
 backend/app/
   main.py               FastAPI 路由、异常映射、依赖装配、就绪检查
   assistant.py          助手会话、消息幂等、上下文记录和规划会话衔接
-  dialogue.py           快速解析、受限 Command、槽位合并和确定性 Flow
+  dialogue.py           对话内核兼容导出层
+  dialogue_commands.py  受限 Command、槽位名称和纯状态类型
+  dialogue_context.py   专属上下文清单与最近完整轮次渲染
+  dialogue_generator.py 受限 LLM 调用、用量记录和请求合并
+  dialogue_flow.py      快速解析、槽位合并和确定性追问
   skills.py             两个静态 Skill 的触发条件、任务输入与允许副作用
   config.py             环境变量配置
   models.py             Pydantic 请求、事实、会话和行程模型
   errors.py             稳定错误码
   runtime.py            后台任务、幂等、恢复、重试、取消和步骤状态
   workflow.py           编译并复用 LangGraph 发现图与生成图
-  travel.py             行程组装、编辑重算、预算、校验和导出
+  travel.py             行程组装、候选校验、编辑重算和行程读写
+  travel_budget.py      经验预算、真实车票/酒店报价合并与超额提示
+  travel_export.py      已校验行程的 Markdown 导出
   storage.py            行程、会话、Provider 缓存和本地目录的 SQLite 实现
   providers/
     base.py             MCP 生命周期、缓存执行器、去重、并发、重试和熔断
-    maps.py             本地/高德地图、Open-Meteo、坐标转换和路线估算
+    maps.py             本地优先、调度和交通降级策略，兼容既有导入
+    amap.py             高德 HTTP、缓存、限流与响应解析
+    weather.py          Open-Meteo 预报与日期覆盖判断
+    geo.py              WGS-84/GCJ-02、POI 解析和本地路线估算
     rail.py             12306 MCP 解析、票价合并和中转补价
     hotels.py           RollingGo OAuth、兼容 DIDA 和 OSM 酒店降级
     planner.py          确定性规划、受控旧规划器和可选文案润色
@@ -80,6 +89,7 @@ frontend/src/
   main.ts / App.vue     路由与应用壳
   api.ts / types.ts     稳定 API 和类型
   TripMap.vue           只绘制供应商返回的真实轨迹
+  styles/               基础、工作台、行程、历史、对话和响应式样式
   pages/
     ChatPage.vue        多轮需求收集、恢复和当前需求摘要
     PlanPage.vue        独立表单规划入口
@@ -104,12 +114,13 @@ POI 准备完成后并行执行去程、返程、酒店和天气；生成图依�
 润色、交通查询、组装与最终校验。
 
 完整认知层设计见 [ASSISTANT_ARCHITECTURE.md](ASSISTANT_ARCHITECTURE.md)。
+本地运行、故障处理和验证流程见 [OPERATIONS.md](OPERATIONS.md)。
 
 ## 对话上下文边界
 
 - `TravelDialogueState` 是任务事实，按消息版本保存；滚动摘要只帮助理解，不能覆盖槽位。
-- 默认最多读取 5,000 字符上下文、2,048 输入 Token 和 512 输出 Token，单次超时 8 秒；
-  每会话默认累计上限 20,000 Token，均可通过环境变量下调。
+- 默认最多读取 5,000 字符上下文，意图生成不设置输入、输出或会话累计 Token 硬限制；
+  单次超时 15 秒，并记录供应商实际用量或本地保守估算。
 - 每轮只允许 `StartFlow / SetSlot / ClearSlot / Confirm / CancelFlow / RouteToChat /
   RememberSlot / ForgetMemory`；记忆命令还必须通过当前消息中的显式授权校验。
 - 意图阶段只加载 Skill 的无正文契约，不加载 Skill 实现、POI、车票、酒店、地图数据或
@@ -288,6 +299,9 @@ python scripts/build_catalog.py
 ```
 
 来源与许可证见 [backend/scripts/README.md](backend/scripts/README.md)。
+
+多人共享的 PostgreSQL/PostGIS 树形地点库是独立构建目标，当前 FastAPI 尚未切换到该库；
+表、字段、许可、构建和查询方式见 [DATABASE.md](DATABASE.md)。
 
 ## 验证
 

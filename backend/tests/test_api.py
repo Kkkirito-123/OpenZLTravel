@@ -6,7 +6,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app, get_planning_runtime, get_travel_service
+from app.config import Settings
+from app.main import ApplicationContainer, app, get_planning_runtime, get_travel_service
 from app.storage import SqliteTripRepository
 from app.travel import TravelService
 from tests.fakes import FakeMapProvider, FakePlanner
@@ -44,6 +45,29 @@ def test_local_frontend_cors_allows_dynamic_vite_port() -> None:
 
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://127.0.0.1:5180"
+
+
+@pytest.mark.asyncio
+async def test_application_container_closes_runtime_and_all_http_clients(tmp_path: Path) -> None:
+    """容器关闭必须回收后台任务、同步地图客户端和异步 MCP 连接池。"""
+
+    container = ApplicationContainer(
+        Settings(
+            database_path=str(tmp_path / "container.sqlite3"),
+            catalog_path=str(tmp_path / "missing-catalog.sqlite3"),
+            rollinggo_hotel_token_path=str(tmp_path / "missing-token.json"),
+            llm_api_key="",
+            llm_model="",
+        )
+    )
+
+    await container.close()
+    await container.close()
+
+    assert container.runtime.tasks == {}
+    assert container.amap_client.http.is_closed
+    assert container.weather_client.http.is_closed
+    assert all(client.http.is_closed for client in container.provider_clients)
 
 
 def test_trip_api_lifecycle(tmp_path: Path) -> None:
@@ -95,9 +119,7 @@ async def test_planning_session_api_lifecycle(tmp_path: Path) -> None:
     app.dependency_overrides[get_travel_service] = lambda: runtime.travel_service
     transport = httpx.ASGITransport(app=app)
     try:
-        async with httpx.AsyncClient(
-            transport=transport, base_url="http://testserver"
-        ) as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             request = planning_request().model_dump(mode="json")
             created = await client.post(
                 "/api/planning-sessions",
@@ -117,12 +139,8 @@ async def test_planning_session_api_lifecycle(tmp_path: Path) -> None:
             selected = await client.put(
                 f"/api/planning-sessions/{session_id}/selection",
                 json={
-                    "outbound": {
-                        "option_id": discovered["outbound_options"][0]["option_id"]
-                    },
-                    "return_trip": {
-                        "option_id": discovered["return_options"][0]["option_id"]
-                    },
+                    "outbound": {"option_id": discovered["outbound_options"][0]["option_id"]},
+                    "return_trip": {"option_id": discovered["return_options"][0]["option_id"]},
                     "hotel_id": discovered["hotel_options"][0]["hotel_id"],
                 },
             )
@@ -135,9 +153,7 @@ async def test_planning_session_api_lifecycle(tmp_path: Path) -> None:
             assert hotel.status_code == 200
             assert hotel.json()["name"] == discovered["hotel_options"][0]["name"]
 
-            generated = await client.post(
-                f"/api/planning-sessions/{session_id}/generate"
-            )
+            generated = await client.post(f"/api/planning-sessions/{session_id}/generate")
             assert generated.status_code == 202
             completed = await _poll_session(client, session_id, "completed")
             trip_id = completed["trip_id"]

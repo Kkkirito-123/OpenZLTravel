@@ -95,12 +95,20 @@ class ProviderExecutor:
             if task is None:
                 task = asyncio.create_task(self._execute(key, ttl_seconds, operation))
                 self.inflight[key] = task
-        try:
-            return cast(tuple[T, bool], await task)
-        finally:
-            async with self.lock:
-                if self.inflight.get(key) is task:
-                    self.inflight.pop(key, None)
+                task.add_done_callback(lambda completed: self._discard_inflight(key, completed))
+        # 单个 HTTP 请求取消不应中断同 key 的共享查询；结果仍会写入缓存，
+        # 后续等待者或下一次查询可以继续复用它。
+        return cast(tuple[T, bool], await asyncio.shield(task))
+
+    def _discard_inflight(self, key: str, completed: asyncio.Future[Any]) -> None:
+        """仅由完成任务清理自身，避免取消的等待者提前移除在途请求。"""
+
+        if self.inflight.get(key) is completed:
+            self.inflight.pop(key, None)
+        # 所有等待者都取消时也要读取异常，避免 asyncio 在日志中报未处理异常。
+        if not completed.cancelled():
+            with contextlib.suppress(Exception):
+                completed.exception()
 
     async def _execute(
         self, key: str, ttl_seconds: int, operation: Callable[[], Awaitable[T]]
@@ -133,9 +141,7 @@ class McpHttpClient:
 
     PROTOCOL_VERSION = "2025-06-18"
 
-    def __init__(
-        self, url: str, timeout_seconds: float, bearer_token: str = ""
-    ) -> None:
+    def __init__(self, url: str, timeout_seconds: float, bearer_token: str = "") -> None:
         headers = {
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
@@ -276,9 +282,7 @@ class McpHttpClient:
         return self.request_id
 
 
-def _response_payload(
-    response: httpx.Response, request_id: int | None = None
-) -> dict[str, Any]:
+def _response_payload(response: httpx.Response, request_id: int | None = None) -> dict[str, Any]:
     content_type = response.headers.get("content-type", "")
     if "text/event-stream" not in content_type:
         return cast(dict[str, Any], response.json())

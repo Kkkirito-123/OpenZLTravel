@@ -10,26 +10,31 @@ OpenZLTravel V0.5 是独立旅行业务应用，通过公共接口复用 `re_zla
 
 ```text
 main.py
-  → assistant.py → dialogue.py
+  → assistant.py → dialogue.py → dialogue_commands.py / dialogue_context.py /
+    dialogue_generator.py / dialogue_flow.py
   → skills.py
   → runtime.py
   → workflow.py
-  → travel.py
+  → travel.py → travel_budget.py / travel_export.py
   → providers/base.py
-  → providers/maps.py / rail.py / hotels.py / planner.py
+  → providers/maps.py → amap.py / weather.py / geo.py
+  → providers/rail.py / hotels.py / planner.py
   → storage.py
   → models.py / errors.py / config.py
 ```
 
 - `main.py`：HTTP、异常映射和依赖装配，不写业务规则。
 - `assistant.py`：会话锁、消息幂等、OpenZLAgent 上下文记录和规划会话衔接。
-- `dialogue.py`：快速解析、受限命令、槽位归一化与确定性追问，不访问供应商。
+- `dialogue.py`：兼容导出层；新代码按职责进入 `dialogue_commands.py`、`dialogue_context.py`、
+  `dialogue_generator.py` 或 `dialogue_flow.py`，不访问供应商。
 - `skills.py`：静态 Skill 契约和允许副作用，不动态加载代码或供应商参数。
 - `runtime.py`：任务、幂等、恢复、取消和会话状态，不解析供应商响应。
 - `workflow.py`：图结构和节点依赖，不保存最终行程。
-- `travel.py`：事实组装、候选校验、编辑重算、预算和 Markdown。
+- `travel.py`：事实组装、候选校验、编辑重算和行程读写；`travel_budget.py` 只处理
+  经验预算与真实报价合并，`travel_export.py` 只处理 Markdown 导出。
 - `providers/base.py`：MCP 生命周期、SQLite 缓存执行器、请求合并、重试和熔断。
-- `providers/maps.py`：地图、天气、坐标和本地路线估算。
+- `providers/maps.py`：本地优先、异步调度和交通降级；高德 HTTP 在 `amap.py`，天气在
+  `weather.py`，坐标与本地估算在 `geo.py`。
 - `providers/rail.py`、`hotels.py`：供应商参数与稳定模型解析；酒店优先复用
   RollingGo Skill OAuth 令牌，旧 DIDA Token 仅作兼容。
 - `providers/planner.py`：确定性规划和只允许改文案的 LLM 增强。
@@ -99,6 +104,7 @@ models → 无业务依赖
 - 图片必须懒加载并处理失败占位；抽屉支持遮罩关闭、显式关闭和 Escape。
 - 375px 下不得产生页面横向滚动；表格可在自己的容器内滚动。
 - 动画使用 150～300ms，并遵循 `prefers-reduced-motion`。
+- `styles.css` 只维护加载顺序；按页面或职责修改 `styles/` 下对应文件，避免重新堆回单一大文件。
 
 ## 代码风格
 

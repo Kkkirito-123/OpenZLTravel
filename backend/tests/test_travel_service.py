@@ -137,11 +137,16 @@ def test_legacy_itinerary_json_remains_readable(tmp_path: Path) -> None:
             place.pop("image_url")
         if day["hotel"]:
             day["hotel"].pop("image_url")
-    with sqlite3.connect(database_path) as connection:
+    connection = sqlite3.connect(database_path)
+    try:
         connection.execute(
             "UPDATE trips SET itinerary_json = ? WHERE trip_id = ?",
             (json.dumps(payload, ensure_ascii=False), str(itinerary.trip_id)),
         )
+        connection.commit()
+    finally:
+        # sqlite3 的上下文管理器只提交或回滚，不会关闭连接。
+        connection.close()
 
     restored = repository.get(itinerary.trip_id)
 
