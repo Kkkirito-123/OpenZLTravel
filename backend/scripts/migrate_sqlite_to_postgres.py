@@ -84,12 +84,14 @@ def _import_business_tables(
         ("travel_dialogue_sessions", _import_dialogue_sessions),
         ("travel_dialogue_requests", _import_dialogue_requests),
         ("travel_memories", _import_memories),
-        ("provider_cache", _import_provider_cache),
     )
-    return {
+    counts = {
         table: importer(source, target, visitor_id) if _has_table(source, table) else 0
         for table, importer in importers
     }
+    # Provider 缓存是可再生数据，Redis 阶段不把它混入 PostgreSQL 事务。
+    counts["provider_cache_skipped"] = _table_count(source, "provider_cache")
+    return counts
 
 
 def _import_conversation_tables(
@@ -291,34 +293,6 @@ def _import_memories(
     )
 
 
-def _import_provider_cache(
-    source: sqlite3.Connection, target: Connection[Any], _: UUID
-) -> int:
-    rows = source.execute("SELECT * FROM provider_cache ORDER BY provider, cache_key")
-    return _execute_many(
-        target,
-        """
-        INSERT INTO app.providercache
-            (provider, cachekey, payloadjson, expiresat, updatedat)
-        VALUES (%s, %s, %s, %s, %s)
-        ON CONFLICT (provider, cachekey) DO UPDATE SET
-            payloadjson = excluded.payloadjson,
-            expiresat = GREATEST(app.providercache.expiresat, excluded.expiresat),
-            updatedat = GREATEST(app.providercache.updatedat, excluded.updatedat)
-        """,
-        (
-            (
-                row["provider"],
-                row["cache_key"],
-                Jsonb(_json(row["payload_json"])),
-                row["expires_at"],
-                row["updated_at"],
-            )
-            for row in rows
-        ),
-    )
-
-
 def _insert_legacy_visitor(
     connection: Connection[Any], visitor_id: UUID, source_hash: str, now: datetime
 ) -> None:
@@ -371,6 +345,13 @@ def _has_table(connection: sqlite3.Connection, table: str) -> bool:
         (table,),
     ).fetchone()
     return row is not None
+
+
+def _table_count(connection: sqlite3.Connection, table: str) -> int:
+    if not _has_table(connection, table):
+        return 0
+    row = connection.execute(f"SELECT count(*) FROM {table}").fetchone()
+    return int(row[0]) if row else 0
 
 
 def _open_readonly(path: Path) -> sqlite3.Connection:

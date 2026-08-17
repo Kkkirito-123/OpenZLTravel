@@ -920,9 +920,11 @@ async def test_recovery_does_not_save_an_existing_complete_trip_again(tmp_path: 
     repository.save_session(completed.model_copy(update={"status": "generating"}))
     recovered = PlanningRuntime(repository, service, workflow, rail, hotels)
     await recovered.recover()
-    await wait_for(recovered, session.session_id, "completed")
-
-    assert repository.save_calls == 1
+    try:
+        await wait_for(recovered, session.session_id, "completed")
+        assert repository.save_calls == 1
+    finally:
+        await recovered.close()
 
 
 def test_mcp_json_and_sse_results_are_supported() -> None:

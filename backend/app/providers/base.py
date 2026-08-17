@@ -1,6 +1,6 @@
 """外部 Provider 的共享稳定性设施。
 
-本文件集中 MCP Streamable HTTP、SQLite 缓存、同请求合并和熔断。具体供应商只负责
+本文件集中 MCP Streamable HTTP、Redis 缓存、同请求合并和熔断。具体供应商只负责
 构造工具参数和解析领域模型，不得各自实现一套重试循环。
 """
 
@@ -13,6 +13,7 @@ from typing import Any, Protocol, TypeVar, cast
 
 import httpx
 
+from app.coordination import Coordination
 from app.errors import ProviderError
 
 T = TypeVar("T")
@@ -71,6 +72,7 @@ class ProviderExecutor:
         concurrency: int = 4,
         failure_threshold: int = 3,
         cooldown_seconds: float = 30,
+        coordination: Coordination | None = None,
     ) -> None:
         self.provider = provider
         self.cache = cache
@@ -78,6 +80,7 @@ class ProviderExecutor:
         self.breaker = CircuitBreaker(failure_threshold, cooldown_seconds)
         self.inflight: dict[str, asyncio.Task[Any]] = {}
         self.lock = asyncio.Lock()
+        self.coordination = coordination
 
     async def run(
         self,
@@ -113,26 +116,31 @@ class ProviderExecutor:
     async def _execute(
         self, key: str, ttl_seconds: int, operation: Callable[[], Awaitable[T]]
     ) -> tuple[T, bool]:
-        self.breaker.ensure_available()
-        async with self.semaphore:
-            for attempt in range(2):
-                try:
-                    result = await operation()
-                    self.breaker.success()
-                    self.cache.set_cache(self.provider, key, result, ttl_seconds)
-                    return result, False
-                except httpx.HTTPStatusError as error:
-                    status = error.response.status_code
-                    if status >= 500 and attempt == 0:
-                        self.breaker.failure()
-                        continue
-                    raise _http_provider_error(self.provider, status) from error
-                except (httpx.TimeoutException, httpx.NetworkError) as error:
-                    self.breaker.failure()
-                    if attempt == 1:
-                        raise ProviderError(
-                            f"{self.provider}_unavailable", "外部数据源连接失败"
-                        ) from error
+        async with _request_lock(self.coordination, self.provider, key):
+            cached = self.cache.get_cache(self.provider, key)
+            if cached is not None:
+                return cast(T, cached), True
+            self.breaker.ensure_available()
+            async with self.semaphore:
+                async with _provider_slot(self.coordination, self.provider):
+                    for attempt in range(2):
+                        try:
+                            result = await operation()
+                            self.breaker.success()
+                            self.cache.set_cache(self.provider, key, result, ttl_seconds)
+                            return result, False
+                        except httpx.HTTPStatusError as error:
+                            status = error.response.status_code
+                            if status >= 500 and attempt == 0:
+                                self.breaker.failure()
+                                continue
+                            raise _http_provider_error(self.provider, status) from error
+                        except (httpx.TimeoutException, httpx.NetworkError) as error:
+                            self.breaker.failure()
+                            if attempt == 1:
+                                raise ProviderError(
+                                    f"{self.provider}_unavailable", "外部数据源连接失败"
+                                ) from error
         raise ProviderError(f"{self.provider}_unavailable", "外部数据源暂时不可用")
 
 
@@ -348,3 +356,25 @@ def _http_provider_error(provider: str, status: int) -> ProviderError:
     if status == 429:
         return ProviderError(f"{provider}_rate_limited", "外部数据源请求过于频繁")
     return ProviderError(f"{provider}_unavailable", "外部数据源暂时不可用")
+
+
+@contextlib.asynccontextmanager
+async def _provider_slot(
+    coordination: Coordination | None, provider: str
+) -> Any:
+    if coordination is None:
+        yield
+        return
+    async with coordination.provider_slot(provider):
+        yield
+
+
+@contextlib.asynccontextmanager
+async def _request_lock(
+    coordination: Coordination | None, provider: str, key: str
+) -> Any:
+    if coordination is None:
+        yield
+        return
+    async with coordination.request_lock(provider, key):
+        yield

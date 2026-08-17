@@ -1,17 +1,16 @@
-"""把 Locust、Fake Upstream 和 SQLite 指标汇总成中文基线报告。"""
+"""把 Locust、Fake Upstream、PostgreSQL 和 Redis 指标汇总成中文报告。"""
 
 from __future__ import annotations
 
 import argparse
 import csv
 import json
-import sqlite3
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 
-def build_report(results_dir: Path, database_path: Path) -> dict[str, Any]:
+def build_report(results_dir: Path, database_stats_path: Path) -> dict[str, Any]:
     """读取本轮产物并生成稳定的机器可读汇总。"""
 
     locust = _locust_summary(results_dir / "locust_stats.csv")
@@ -20,7 +19,7 @@ def build_report(results_dir: Path, database_path: Path) -> dict[str, Any]:
     application = _application_log(results_dir / "app.log")
     fake = _read_json(results_dir / "fake-stats.json")
     business = _read_json(results_dir / "business-counters.json")
-    database = _database_summary(database_path)
+    database = _read_json(database_stats_path)
     expected_calls = _expected_provider_calls(database, business)
     actual_calls = sum(
         int(item.get("calls", 0))
@@ -30,7 +29,7 @@ def build_report(results_dir: Path, database_path: Path) -> dict[str, Any]:
     return {
         "scenario": fake.get("scenario", "unknown"),
         "machine": _read_json(results_dir / "machine.json"),
-        "http": {**locust, **failures, **application},
+        "http": _http_metrics(locust, failures, application),
         "stages": stages,
         "business": business,
         "database": database,
@@ -39,15 +38,28 @@ def build_report(results_dir: Path, database_path: Path) -> dict[str, Any]:
             "expected_calls_without_reuse": expected_calls,
             "actual_fake_calls": actual_calls,
             "cache_or_merge_avoided_estimate": max(0, expected_calls - actual_calls),
-            "note": "估算值同时包含 SQLite 缓存和进程内同请求合并，不用于计费。",
+            "note": "估算值同时包含 Redis 缓存和请求合并，不用于计费。",
         },
     }
 
 
-def write_report(results_dir: Path, database_path: Path) -> dict[str, Any]:
+def _http_metrics(
+    locust: dict[str, Any],
+    failures: dict[str, int],
+    application: dict[str, int],
+) -> dict[str, Any]:
+    """合并 HTTP 与日志计数，同名基础设施错误需要相加而不是覆盖。"""
+
+    result = {**locust, **failures, **application}
+    for key in ("database_errors", "coordination_errors"):
+        result[key] = failures.get(key, 0) + application.get(key, 0)
+    return result
+
+
+def write_report(results_dir: Path, database_stats_path: Path) -> dict[str, Any]:
     """写出 JSON 与中文 Markdown 两种结果。"""
 
-    report = build_report(results_dir, database_path)
+    report = build_report(results_dir, database_stats_path)
     results_dir.mkdir(parents=True, exist_ok=True)
     (results_dir / "summary.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -75,8 +87,10 @@ def _locust_failures(path: Path) -> dict[str, int]:
     for row in rows:
         message = str(row.get("Error", "")).lower()
         count = _integer(row.get("Occurrences"))
-        if "database is locked" in message or "sqlite" in message and "locked" in message:
-            errors["sqlite_locked"] += count
+        if "database_unavailable" in message or "pool timeout" in message:
+            errors["database_errors"] += count
+        if "coordination_unavailable" in message:
+            errors["coordination_errors"] += count
         if "timeout" in message or "timed out" in message:
             errors["timeouts"] += count
         if "429" in message or "rate" in message and "limit" in message:
@@ -118,72 +132,14 @@ def _stage_summary(path: Path) -> list[dict[str, Any]]:
 
 def _application_log(path: Path) -> dict[str, int]:
     if not path.is_file():
-        return {"unhandled_exceptions": 0, "sqlite_locked": 0, "sqlite_open_errors": 0}
+        return {"unhandled_exceptions": 0, "database_errors": 0, "coordination_errors": 0}
     content = path.read_text(encoding="utf-8", errors="replace").lower()
     return {
         "unhandled_exceptions": content.count("exception in asgi application")
         + content.count("task exception was never retrieved"),
-        "sqlite_locked": content.count("database is locked"),
-        "sqlite_open_errors": content.count("unable to open database file"),
-    }
-
-
-def _database_summary(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {"available": False}
-    connection = sqlite3.connect(path)
-    connection.row_factory = sqlite3.Row
-    try:
-        sessions = connection.execute(
-            "SELECT status, session_json FROM planning_sessions"
-        ).fetchall()
-        trips = connection.execute("SELECT itinerary_json FROM trips").fetchall()
-        dialogues = connection.execute(
-            "SELECT COUNT(*) AS count FROM travel_dialogue_sessions"
-        ).fetchone()["count"]
-        requests = connection.execute(
-            "SELECT COUNT(*) AS count FROM travel_dialogue_requests"
-        ).fetchone()["count"]
-        cache_entries = connection.execute(
-            "SELECT COUNT(*) AS count FROM provider_cache"
-        ).fetchone()["count"]
-    finally:
-        connection.close()
-    statuses = Counter(str(row["status"]) for row in sessions)
-    steps = [
-        step
-        for row in sessions
-        for step in json.loads(row["session_json"]).get("steps", [])
-        if isinstance(step, dict)
-    ]
-    completed_steps = [step for step in steps if step.get("status") == "completed"]
-    cache_hits = sum(bool(step.get("cache_hit")) for step in completed_steps)
-    durations = [
-        int(step["duration_ms"])
-        for step in steps
-        if isinstance(step.get("duration_ms"), int)
-    ]
-    planning_ids = [
-        json.loads(row["itinerary_json"]).get("planning_session_id") for row in trips
-    ]
-    duplicates = sum(count - 1 for count in Counter(planning_ids).values() if count > 1)
-    return {
-        "available": True,
-        "planning_sessions": len(sessions),
-        "planning_statuses": dict(statuses),
-        "assistant_sessions": dialogues,
-        "assistant_requests": requests,
-        "trips": len(trips),
-        "duplicate_trips": duplicates,
-        "provider_cache_entries": cache_entries,
-        "completed_steps": len(completed_steps),
-        "cache_hits": cache_hits,
-        "cache_hit_rate": round(cache_hits / len(completed_steps), 4)
-        if completed_steps
-        else 0,
-        "average_step_duration_ms": round(sum(durations) / len(durations), 2)
-        if durations
-        else None,
+        "database_errors": content.count("database_unavailable")
+        + content.count("pool timeout"),
+        "coordination_errors": content.count("coordination_unavailable"),
     }
 
 
@@ -219,8 +175,8 @@ def _markdown(report: dict[str, Any]) -> str:
 - p50 / p95 / p99：{http.get('p50_ms')} / {http.get('p95_ms')} / {http.get('p99_ms')} ms
 - HTTP 失败：{http.get('failures', 0)}
 - 未处理异常：{http.get('unhandled_exceptions', 0)}
-- SQLite locked：{http.get('sqlite_locked', 0)}
-- SQLite 无法打开：{http.get('sqlite_open_errors', 0)}
+- PostgreSQL 错误：{http.get('database_errors', 0)}
+- Redis 协调错误：{http.get('coordination_errors', 0)}
 - 规划会话：{database.get('planning_sessions', 0)}
 - 完成行程：{database.get('trips', 0)}
 - 重复行程：{database.get('duplicate_trips', 0)}
@@ -271,9 +227,9 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="汇总 OpenZLTravel 并发实验结果")
     parser.add_argument("--results", type=Path, required=True)
-    parser.add_argument("--database", type=Path, required=True)
+    parser.add_argument("--database-stats", type=Path, required=True)
     args = parser.parse_args()
-    report = write_report(args.results, args.database)
+    report = write_report(args.results, args.database_stats)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
 

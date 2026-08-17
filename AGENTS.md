@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-OpenZLTravel V0.5 是独立旅行业务应用，通过公共接口复用 `re_zlagent` 的模型、上下文和
+OpenZLTravel V0.6 是独立旅行业务应用，通过公共接口复用 `re_zlagent` 的模型、上下文和
 会话组件。LangGraph 只负责确定性节点编排，不代表多 Agent。不得修改 `src/re_zlagent/`
 或把旅行业务放入 OpenZLAgent 核心。
 
@@ -20,7 +20,7 @@ main.py
   → providers/maps.py → amap.py / weather.py / geo.py
   → providers/rail.py / hotels.py / planner.py
   → catalog.py
-  → storage.py
+  → storage.py → identity.py → coordination.py
   → models.py / errors.py / config.py
 ```
 
@@ -40,19 +40,20 @@ main.py
   RollingGo Skill OAuth 令牌，旧 DIDA Token 仅作兼容。
 - `providers/planner.py`：确定性规划和只允许改文案的 LLM 增强。
 - `catalog.py`：PostgreSQL 公共地点查询，不再提供生产 SQLite 回滚实现。
-- `storage.py`：PostgreSQL 行程、规划、助手状态和 Provider 缓存；不再负责地点目录。
+- `storage.py`：PostgreSQL 行程、规划和助手权威状态；不再负责地点目录或 Provider 缓存。
 - `identity.py`：匿名 Cookie、Token 哈希、资源认领和所有权边界。
+- `coordination.py`：集中 Redis Key、缓存、锁、限流、Provider 槽和任务租约；业务层不得直接拼 Key。
 - `models.py`：稳定公共类型，不依赖业务实现。
 
 依赖方向：
 
 ```text
-main → assistant → dialogue / skills / runtime / storage
+main → assistant → dialogue / skills / runtime / storage / coordination
 assistant → re_zlagent 公共 Context / Conversation / Model 接口
 main → runtime → workflow → travel / providers
 runtime → storage / models
 travel → models / storage
-providers → config / models / errors / CacheStore
+providers → config / models / errors / coordination
 catalog → PostgreSQL catalog / models / errors
 storage → models
 models → 无业务依赖
@@ -81,10 +82,10 @@ models → 无业务依赖
 ## 稳定性约定
 
 - MCP 客户端遵循 Streamable HTTP 初始化、通知、协议版本和会话 ID 生命周期。
-- 同请求先查 PostgreSQL 共享缓存，再做进程内任务合并；缓存键不得包含 Key 或 Token。
+- 同请求先查 Redis 共享缓存，再做进程内任务合并；缓存键不得包含 API Key 或 Token。
 - 不把 Provider 结果缓存称为 KV Cache；真实 KV Cache 由模型供应商持有，只能通过稳定提示
   前缀、可选 `prompt_cache_key` 和 cached token 指标使用与验证。
-- 地点查询和业务状态均使用多人共享 PostgreSQL；当前仍保持单 Worker，Redis 多 Worker 属于后续 PR。
+- 地点查询和业务状态使用多人共享 PostgreSQL；生产默认四 Worker，由 Redis 协调共享临时状态。
 - PostgreSQL 地点未命中允许高德兜底；数据库连接故障必须返回 `catalog_unavailable`，
   禁止把基础设施故障放大成批量高德请求。
 - 每个 Provider 独立超时、限并发、最多一次网络重试和熔断。
@@ -93,10 +94,12 @@ models → 无业务依赖
   cancelled`；每个步骤独立记录耗时、尝试次数和降级信息。
 - `Idempotency-Key` 防止重复创建；重复生成和重启恢复不能重复保存完整行程。
 - 助手使用 `message_id` 幂等；相同 ID 的不同正文必须返回冲突，失败不得推进状态版本。
-- 同一助手会话的消息在进程内串行合并，状态、幂等响应和长期偏好在同一 PostgreSQL 事务保存。
+- 同一助手会话先取得 Redis 写锁，状态、幂等响应和长期偏好再在同一 PostgreSQL 事务保存。
 - 浏览器 Cookie 只保存随机 Token，数据库只保存 Token 哈希；资源查询必须同时匹配 visitorid 和资源 ID。
 - SQLite 只允许出现在一次性迁移工具和迁移测试中；生产 `app/` 不得导入 `sqlite3`。
-- PostgreSQL 唯一约束是跨进程幂等最终保障；Redis 锁和租约必须等后续 PR 实现后才可使用。
+- PostgreSQL 唯一约束是跨进程幂等最终保障；Redis 缓存只加速读取，不能替代唯一约束。
+- Redis 锁和租约必须设置 TTL，值使用随机 Token，释放前必须比较 Token，避免误删新持有者的锁。
+- Redis 普通缓存、访客缓存、幂等提示和 API 限流故障时允许回退；会话锁、Provider 槽和任务租约故障时必须拒绝执行。
 - 日志允许记录请求 ID、会话 ID、步骤、耗时、缓存命中和稳定错误码，禁止记录密钥、
   完整上游响应或个人信息。
 
@@ -120,7 +123,7 @@ models → 无业务依赖
 - 优先早返回与单一职责，普通函数尽量不超过 40 行，嵌套不超过两层。
 - Ruff 启用 `C901`，圈复杂度上限为 8；不为未批准的未来功能增加抽象。
 - 修改应小而可验证，不顺手重构无关代码。
-- 不读取、输出或提交 `.env`、密钥、SQLite、`db/`、离线大数据和构建产物。
+- 不读取、输出或提交 `.env`、密钥、SQLite、Redis 快照、`db/`、离线大数据和构建产物。
 
 ## 验证命令
 

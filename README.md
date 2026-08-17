@@ -1,9 +1,9 @@
-# OpenZLTravel V0.5
+# OpenZLTravel V0.6
 
 OpenZLTravel 是一个支持匿名访客隔离的多轮旅行助手。用户先通过对话补全目的地、日期和预算，
 需求完整后进入原有旅行工作台，并行查询车票、酒店、天气和本地 POI。项目以 editable
 方式复用 OpenZLAgent 的模型客户端、上下文清单、会话保存和滚动摘要，但不修改其核心代码。
-V0.5 增加显式长期偏好、静态 Skill 契约、会话 Token 账本和两级意图缓存。
+V0.6 在 PostgreSQL 共享状态之上增加 Redis 协调，生产模式可由多个 Worker 共同服务。
 
 ## 核心流程
 
@@ -35,7 +35,7 @@ PostgreSQL 保存共享业务状态和完整行程
 - 当前消息、权威状态、待回答字段、Skill 契约、长期偏好、最近完整轮次和滚动摘要组成专属上下文。
 - 用户明确说“记住/忘记”时，保存或删除跨会话稳定偏好；当前明确输入始终优先。
 - 意图模型不设置生成 Token 或会话累计 Token 硬上限，前端只记录成功调用的实际或估算用量。
-- 相同意图提示先读 PostgreSQL 精确结果缓存；同一进程的并发请求只产生一次模型调用。
+- 相同意图提示先读 Redis 精确结果缓存；同一进程的并发请求还会合并为一次模型调用。
 - “省域推荐”和“周边推荐”先收集结构化需求，不生成缺少数据支持的城市结论。
 - 具体城市、日期和预算完整后，以消息版本作为幂等键创建一次现有规划会话。
 - 创建 1～7 天、国内单目的地的持久规划会话，页面轮询独立步骤状态。
@@ -50,7 +50,7 @@ PostgreSQL 保存共享业务状态和完整行程
 - 结果页支持地点详情、真实路线地图、每日预算、拖拽/按钮排序和单日局部重算。
 - 会话支持幂等创建、取消、重试和重启恢复；失败时不保存半成品。
 - 浏览器通过 HttpOnly 匿名 Cookie 获得访客身份；所有对话、规划和行程查询都同时校验访客 ID。
-- PostgreSQL 唯一约束提供跨进程幂等保障；Redis 多 Worker 协调属于后续 PR，不在当前运行链路中。
+- PostgreSQL 唯一约束提供幂等最终保障；Redis 负责跨 Worker 锁、缓存、限流和任务租约。
 
 ## 架构
 
@@ -77,6 +77,7 @@ backend/app/
   catalog.py            PostgreSQL 地点、行政区和附近 POI 查询
   storage.py            PostgreSQL 业务 Repository、事务、幂等和 revision 更新
   identity.py           匿名 Cookie、Token 哈希和旧数据认领
+  coordination.py       Redis 缓存、锁、限流、Provider 槽和任务租约
   database/app.sql      PostgreSQL app Schema 与中文 COMMENT
   scripts/              一次性 SQLite 只读迁移工具
   providers/
@@ -112,8 +113,8 @@ Vue → FastAPI main → TravelAssistantService → Dialogue Flow
                                       └─ PlanningRuntime → WorkbenchWorkflow
                                                             ├─ providers
                                                             ├─ TravelService
-                                                             ├─ PostgreSQL app
-                                                             └─ PostgreSQL catalog
+                                                            ├─ PostgreSQL app / catalog
+                                                            └─ Redis coordination
 ```
 
 LangGraph 只表达节点依赖，不承担事实判断、持久化或 Agent 自主循环。数据发现图在本地
@@ -232,6 +233,12 @@ npm.cmd run dev
 访问 <http://127.0.0.1:5173>。也可在项目根目录执行 `./start.ps1 -Install`；脚本使用
 `npm.cmd`，不会触发 PowerShell 对 `npm.ps1` 的执行策略限制。12306 MCP 仍需单独启动。
 
+生产式本地验证使用四个 Worker；可通过 `WEB_WORKERS` 调整：
+
+```powershell
+.\start.ps1 -Production
+```
+
 ## API
 
 ```text
@@ -272,7 +279,8 @@ GET    /ready
 
 ## 缓存、恢复与降级
 
-`app.providercache` 与业务会话保存在 PostgreSQL 中，连接池默认 2～20。缓存键不包含 API Key：
+业务会话和行程以 PostgreSQL 为权威数据；Provider 与意图结果缓存保存在 Redis，缓存键不包含
+API Key、OAuth Token 或完整请求正文：
 
 | 数据 | TTL |
 |---|---:|
@@ -285,13 +293,21 @@ GET    /ready
 | 高德城市 / POI 兜底 | 24 小时 |
 | 意图命令精确结果 | 1 小时 |
 
-同一进程的相同请求共享任务；每个外部 Provider 独立限并发、最多一次网络重试和熔断。
-认证失败、限流和业务错误不重试。服务重启后恢复 `searching` / `generating` 会话；如果
-完整行程已经保存，恢复任务直接标记完成，不重复写入。
+同一进程的相同请求共享任务，多个 Worker 共享 Redis 缓存和 Provider 并发槽。默认全局并发为
+高德 2、12306 1、酒店 2、LLM 4。每个 Provider 最多一次网络重试并带熔断；认证失败、限流
+和业务错误不重试。
 
-当前 PR 2 使用 PostgreSQL 处理共享状态、事务和跨进程唯一约束，仍保持单 Uvicorn Worker。
-Redis 协调、分布式锁、任务租约和多 Worker 属于后续 PR 3；模型端 KV Cache 不由应用持有，
-仅在供应商明确支持时设置 `INTENT_PROMPT_CACHE_KEY`，并通过返回的 cached token 指标验证是否真正命中。
+后台任务使用 30 秒 Redis 租约并每 10 秒续租；每个 Worker 每 5 秒扫描 PostgreSQL 中的
+`searching` / `generating` 会话。Worker 崩溃后，其他 Worker 在租约过期后接管；完整行程
+已经保存时不会重复写入。PostgreSQL 唯一约束仍是幂等最终保障，Redis 只提供快速协调。
+
+| Redis 能力 | Redis 故障时 |
+|---|---|
+| 普通缓存、访客缓存、幂等提示、API 限流 | 回退 PostgreSQL/Provider 或放行，并记录告警 |
+| 会话写锁、Provider 并发槽、任务租约 | 拒绝执行，避免重复写入或放大上游流量 |
+
+模型端 KV Cache 不由应用持有，仅在供应商明确支持时设置 `INTENT_PROMPT_CACHE_KEY`，并通过
+返回的 cached token 指标验证是否真正命中。
 
 降级规则：12306 失败可自行安排，RollingGo 失败回退 OSM，天气失败标记未知，高德路线失败
 使用本地估算。地点未命中允许高德兜底；PostgreSQL 连接故障直接返回
@@ -334,7 +350,7 @@ npm.cmd run build
 
 ## 并发实验室
 
-当前单 Worker + PostgreSQL 的容量基线使用独立 Docker Compose、Fake Upstream 和 Locust 测量，
+当前四 Worker + PostgreSQL + Redis 的容量回归使用独立 Docker Compose、Fake Upstream 和 Locust 测量，
 不读取真实密钥，也不修改生产 API。先执行 10 用户冒烟：
 
 ```powershell
@@ -344,9 +360,14 @@ npm.cmd run build
 完整的 10 → 50 → 200 → 500 用户阶段、故障场景、指标解释和受限真实供应商探针见
 [CONCURRENCY.md](CONCURRENCY.md)。
 
+当前机器的完整复测达到 35,862 请求零失败；200 用户 p95 为 1.5 秒，500 用户 p95 为
+6.7 秒。铁路、酒店和高德的跨 Worker 相同请求已合并。详细的发现、修复和历史对照也记录在
+[CONCURRENCY.md](CONCURRENCY.md)；这些数字只代表文档所列机器与 Fake Provider 场景，
+不能直接当作真实供应商容量承诺。
+
 ## 当前边界
 
-V0.5 仍是匿名访客、国内单目的地、单 Uvicorn Worker。长期记忆只保存用户明确授权的
+V0.6 仍是匿名访客、国内单目的地；开发模式单 Worker，生产模式默认四 Worker。长期记忆只保存用户明确授权的
 常用出发地、旅行/饮食偏好、节奏、住宿档次和市内交通方式，不保存完整聊天、证件、订单、
 日期、预算或供应商结果。当前不实现登录、支付、自动下单、多城市、真实省域/周边推荐、
 RAG、多 Agent、语音或 PDF；OpenZLAgent 只通过公共接口复用，不承载旅行业务代码。

@@ -18,6 +18,7 @@ from typing import Any, Protocol, cast
 
 import httpx
 
+from app.coordination import Coordination
 from app.errors import ProviderError
 from app.models import CandidateCatalog, City, Poi, RouteSegment, WeatherDay
 from app.providers.amap import (
@@ -269,13 +270,19 @@ class HybridMapProvider:
 class AmapScheduler:
     """统一限制高德异步调用，并合并同一进程内的重复请求。"""
 
-    def __init__(self, concurrency: int = 2, min_interval_seconds: float = 0.4) -> None:
+    def __init__(
+        self,
+        concurrency: int = 2,
+        min_interval_seconds: float = 0.4,
+        coordination: Coordination | None = None,
+    ) -> None:
         self.semaphore = asyncio.Semaphore(max(1, concurrency))
         self.min_interval_seconds = min_interval_seconds
         self.last_request_at = 0.0
         self.slot_lock = asyncio.Lock()
         self.inflight_lock = asyncio.Lock()
         self.inflight: dict[str, asyncio.Task[Any]] = {}
+        self.coordination = coordination
 
     async def run(self, key: str, operation: Callable[[], Awaitable[Any]]) -> Any:
         """相同 key 共享任务，失败直接返回，不做危险的立即重试。"""
@@ -283,7 +290,7 @@ class AmapScheduler:
         async with self.inflight_lock:
             task = self.inflight.get(key)
             if task is None:
-                task = asyncio.create_task(self._execute(operation))
+                task = asyncio.create_task(self._execute(key, operation))
                 self.inflight[key] = task
                 task.add_done_callback(lambda completed: self._discard_inflight(key, completed))
         return await asyncio.shield(task)
@@ -297,15 +304,35 @@ class AmapScheduler:
             with contextlib.suppress(Exception):
                 completed.exception()
 
-    async def _execute(self, operation: Callable[[], Awaitable[Any]]) -> Any:
-        async with self.semaphore:
-            async with self.slot_lock:
-                elapsed = time.monotonic() - self.last_request_at
-                wait = self.min_interval_seconds - elapsed
-                if wait > 0:
-                    await asyncio.sleep(wait)
-                self.last_request_at = time.monotonic()
-            return await operation()
+    async def _execute(self, key: str, operation: Callable[[], Awaitable[Any]]) -> Any:
+        async with _amap_request_lock(self.coordination, key):
+            async with self.semaphore:
+                async with _amap_slot(self.coordination):
+                    async with self.slot_lock:
+                        elapsed = time.monotonic() - self.last_request_at
+                        wait = self.min_interval_seconds - elapsed
+                        if wait > 0:
+                            await asyncio.sleep(wait)
+                        self.last_request_at = time.monotonic()
+                    return await operation()
+
+
+@contextlib.asynccontextmanager
+async def _amap_slot(coordination: Coordination | None) -> Any:
+    if coordination is None:
+        yield
+        return
+    async with coordination.provider_slot("amap"):
+        yield
+
+
+@contextlib.asynccontextmanager
+async def _amap_request_lock(coordination: Coordination | None, key: str) -> Any:
+    if coordination is None:
+        yield
+        return
+    async with coordination.request_lock("amap", key):
+        yield
 
 
 def _transport_key(kind: str, *values: str) -> str:

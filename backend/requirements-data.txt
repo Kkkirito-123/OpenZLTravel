@@ -1,3 +1,4 @@
 # Offline catalog build dependencies; not required by the FastAPI runtime.
 osmium>=4.3,<5
 psycopg[binary]>=3.2,<4
+redis>=5.2,<8

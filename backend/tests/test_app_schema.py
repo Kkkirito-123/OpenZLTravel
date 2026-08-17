@@ -15,7 +15,6 @@ CUSTOM_TABLES = {
     "dialoguesession",
     "dialoguerequest",
     "travelmemory",
-    "providercache",
     "legacyclaim",
     "importrecord",
 }
@@ -28,6 +27,7 @@ def test_app_schema_contains_all_shared_state_tables() -> None:
     tables = set(re.findall(r"CREATE TABLE IF NOT EXISTS app\.([a-z0-9_]+)", SCHEMA))
     assert tables == CUSTOM_TABLES | OPENZL_TABLES
     assert "UNIQUE (visitorid, idempotencykey)" in SCHEMA
+    assert "DROP TABLE IF EXISTS app.providercache" in SCHEMA
     assert "ON DELETE CASCADE ON UPDATE CASCADE" in SCHEMA
 
 

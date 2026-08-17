@@ -14,6 +14,7 @@ from uuid import UUID
 
 from fastapi import Request, Response
 
+from app.coordination import Coordination
 from app.errors import VisitorClaimError
 from app.storage import RepositoryConflictError
 
@@ -35,9 +36,15 @@ class IdentityRepository(Protocol):
 class AnonymousIdentityService:
     """解析 HttpOnly Cookie，并返回当前浏览器的匿名访客编号。"""
 
-    def __init__(self, repository: IdentityRepository, secure_cookie: bool = False) -> None:
+    def __init__(
+        self,
+        repository: IdentityRepository,
+        secure_cookie: bool = False,
+        coordination: Coordination | None = None,
+    ) -> None:
         self._repository = repository
         self._secure_cookie = secure_cookie
+        self._coordination = coordination
 
     def resolve(self, request: Request, response: Response) -> UUID:
         """读取或创建匿名身份，并在需要时写回安全 Cookie。"""
@@ -48,8 +55,15 @@ class AnonymousIdentityService:
         else:
             token = secrets.token_urlsafe(TOKEN_BYTES)
             self._set_cookie(response, token)
+        token_hash = _hash_token(token)
+        cached = self._coordination.get_visitor(token_hash) if self._coordination else None
+        if cached is not None:
+            return cached
         expires_at = _now() + timedelta(seconds=COOKIE_MAX_AGE_SECONDS)
-        return self._repository.get_or_create_visitor(_hash_token(token), expires_at)
+        visitor_id = self._repository.get_or_create_visitor(token_hash, expires_at)
+        if self._coordination:
+            self._coordination.set_visitor(token_hash, visitor_id)
+        return visitor_id
 
     def claim(self, visitor_id: UUID, token: str) -> None:
         """认领一次性旧数据；错误码不暴露旧资源细节。"""

@@ -32,9 +32,10 @@ from re_zlagent.harness.model import (  # type: ignore[import-untyped]
 from app.assistant import TravelAssistantService
 from app.catalog import PostgresCatalogRepository
 from app.config import Settings
+from app.coordination import RedisCoordination
 from app.dialogue import PromptCacheTransport, TravelCommandGenerator
 from app.errors import AppError
-from app.identity import AnonymousIdentityService
+from app.identity import COOKIE_NAME, AnonymousIdentityService
 from app.models import (
     AssistantMessageRequest,
     AssistantSessionView,
@@ -83,6 +84,20 @@ class ApplicationContainer:
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings()
+        self.coordination = RedisCoordination(
+            self.settings.redis_url,
+            {
+                "amap": self.settings.amap_provider_concurrency,
+                "rail": self.settings.rail_provider_concurrency,
+                "hotel": self.settings.hotel_provider_concurrency,
+                "llm": self.settings.llm_provider_concurrency,
+            },
+            timeout_seconds=self.settings.redis_timeout_seconds,
+            session_lock_ttl_seconds=self.settings.session_lock_ttl_seconds,
+            task_lease_ttl_seconds=self.settings.task_lease_ttl_seconds,
+            task_lease_renew_seconds=self.settings.task_lease_renew_seconds,
+            api_rate_limit_per_minute=self.settings.api_rate_limit_per_minute,
+        )
         self.repository = PostgresTravelRepository(
             self.settings.database_url,
             min_size=self.settings.database_pool_min_size,
@@ -92,13 +107,15 @@ class ApplicationContainer:
         self.identity = AnonymousIdentityService(
             self.repository,
             secure_cookie=self.settings.visitor_cookie_secure,
+            coordination=self.coordination,
         )
         self.catalog = self._catalog_repository()
-        self.amap_client = AmapClient(self.settings, self.repository)
-        self.weather_client = OpenMeteoClient(self.settings, self.repository)
+        self.amap_client = AmapClient(self.settings, self.coordination)
+        self.weather_client = OpenMeteoClient(self.settings, self.coordination)
         scheduler = AmapScheduler(
             concurrency=self.settings.amap_scheduler_concurrency,
             min_interval_seconds=self.settings.amap_min_interval_seconds,
+            coordination=self.coordination,
         )
         map_provider = HybridMapProvider(
             catalog=self.catalog,
@@ -107,9 +124,13 @@ class ApplicationContainer:
             weather_provider=self.weather_client,
             scheduler=scheduler,
         )
-        self.travel = TravelService(map_provider, LlmPlanner(self.settings), self.repository)
+        self.travel = TravelService(
+            map_provider,
+            LlmPlanner(self.settings, self.coordination),
+            self.repository,
+        )
         rail_executor = self._executor("rail")
-        hotel_executor = self._executor("hotels")
+        hotel_executor = self._executor("hotel")
         rail_client = McpHttpClient(
             self.settings.rail_mcp_url, self.settings.rail_mcp_timeout_seconds
         )
@@ -147,10 +168,16 @@ class ApplicationContainer:
             self.rail,
             self.hotels,
             DeterministicPlanner(),
-            CopyEnhancer(self.settings),
+            CopyEnhancer(self.settings, self.coordination),
         )
         self.runtime = PlanningRuntime(
-            self.repository, self.travel, workflow, self.rail, self.hotels
+            self.repository,
+            self.travel,
+            workflow,
+            self.rail,
+            self.hotels,
+            self.coordination,
+            self.settings.recovery_scan_seconds,
         )
         self.conversation_pool = create_conversation_pool(
             self.settings.database_url,
@@ -184,10 +211,11 @@ class ApplicationContainer:
             TravelCommandGenerator(
                 intent_model,
                 self.settings.intent_llm_timeout_seconds,
-                cache=self.repository,
+                cache=self.coordination,
                 cache_ttl_seconds=self.settings.intent_result_cache_ttl_seconds,
                 cache_namespace=(f"{self.settings.llm_base_url}|{self.settings.llm_model}"),
                 max_context_chars=self.settings.intent_context_max_chars,
+                coordination=self.coordination,
             )
             if intent_model
             else None
@@ -198,16 +226,18 @@ class ApplicationContainer:
             self.catalog,
             self.runtime,
             generator,
+            self.coordination,
         )
         self._closed = False
 
     def _executor(self, provider: str) -> ProviderExecutor:
         return ProviderExecutor(
             provider,
-            self.repository,
+            self.coordination,
             self.settings.provider_concurrency,
             self.settings.provider_failure_threshold,
             self.settings.provider_cooldown_seconds,
+            self.coordination,
         )
 
     def _catalog_repository(self) -> PostgresCatalogRepository:
@@ -244,11 +274,13 @@ class ApplicationContainer:
 
         database = self.repository.readiness()
         catalog = self.catalog.readiness()
-        ready = database == "ready" and catalog["status"] == "ready"
+        redis = self.coordination.readiness()
+        ready = database == "ready" and catalog["status"] == "ready" and redis == "ready"
         return {
             "status": "ready" if ready else "not_ready",
             "database": database,
             "catalog": catalog["status"],
+            "redis": redis,
             "catalog_pool": catalog["pool"],
             "rail_mcp": "configured" if self.settings.rail_mcp_url else "missing",
             "hotel_provider": self._hotel_readiness(),
@@ -286,6 +318,8 @@ class ApplicationContainer:
         self.conversation_pool.close()
         self.repository.close()
         self.catalog.close()
+        await self.coordination.aclose()
+        self.coordination.close()
 
 
 @lru_cache
@@ -343,7 +377,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         get_container.cache_clear()
 
 
-app = FastAPI(title="OpenZLTravel", version="0.5.0", lifespan=lifespan)
+app = FastAPI(title="OpenZLTravel", version="0.6.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     # Vite 在默认端口被占用时会自动选择新端口，因此仅限定本机主机名，
@@ -363,6 +397,21 @@ async def request_context(
 
     request_id = request.headers.get("X-Request-ID") or str(uuid4())
     started = time.perf_counter()
+    if request.url.path.startswith("/api/"):
+        identity = request.cookies.get(COOKIE_NAME) or (
+            request.client.host if request.client else "unknown"
+        )
+        if not await get_container().coordination.allow_request(identity):
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": {
+                        "code": "rate_limit_exceeded",
+                        "message": "请求过于频繁，请稍后重试",
+                    }
+                },
+                headers={"X-Request-ID": request_id},
+            )
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     LOGGER.info(
