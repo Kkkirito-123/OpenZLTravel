@@ -28,18 +28,32 @@ class CatalogUnavailableError(AppError):
         super().__init__("catalog_unavailable", message, status_code=503)
 
 
+class DatabaseUnavailableError(AppError):
+    """业务 PostgreSQL 不可用。"""
+
+    def __init__(self, message: str = "业务数据库暂时不可用") -> None:
+        super().__init__("database_unavailable", message, status_code=503)
+
+
+class ResourceNotFoundError(AppError):
+    """资源不存在，或不属于当前匿名访客。"""
+
+    def __init__(self, message: str = "请求的资源不存在") -> None:
+        super().__init__("resource_not_found", message, status_code=404)
+
+
+class VisitorClaimError(AppError):
+    """旧数据认领失败。"""
+
+    def __init__(self, code: str, message: str, status_code: int = 400) -> None:
+        super().__init__(code, message, status_code=status_code)
+
+
 class DraftError(AppError):
     """模型草稿无法解析或违反候选数据约束。"""
 
     def __init__(self, message: str) -> None:
         super().__init__("invalid_plan", message, status_code=502)
-
-
-class NotFoundError(AppError):
-    """请求的行程不存在。"""
-
-    def __init__(self, message: str = "行程不存在") -> None:
-        super().__init__("trip_not_found", message, status_code=404)
 
 
 class ConflictError(AppError):

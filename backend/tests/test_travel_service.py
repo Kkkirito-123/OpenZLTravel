@@ -6,9 +6,9 @@ import pytest
 
 from app.errors import AppError, DraftError, ProviderError
 from app.models import DraftActivity
-from app.storage import SqliteTripRepository
 from app.travel import TravelService
 from tests.fakes import FakeMapProvider, FakePlanner, sample_draft, sample_request
+from tests.sqlite_repository import SqliteTripRepository
 
 
 def make_service(

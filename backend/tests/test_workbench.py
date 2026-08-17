@@ -36,10 +36,10 @@ from app.providers.base import _response_payload, _tool_result
 from app.providers.maps import local_routes
 from app.providers.rail import RailProvider
 from app.runtime import PlanningRuntime
-from app.storage import SqliteTripRepository
 from app.travel import TravelService
 from app.workflow import WorkbenchWorkflow, _fetch_transport
 from tests.fakes import FakeMapProvider, FakePlanner
+from tests.sqlite_repository import SqliteTripRepository
 
 
 class AsyncMapProvider(FakeMapProvider):
@@ -166,7 +166,8 @@ class CountingRepository(SqliteTripRepository):
         super().__init__(database_path)
         self.save_calls = 0
 
-    def save(self, itinerary, request):
+    def save(self, itinerary, request, visitor_id=None):
+        del visitor_id
         self.save_calls += 1
         super().save(itinerary, request)
 
@@ -1051,7 +1052,7 @@ def test_sqlite_session_recovery_and_cache_expiry(tmp_path: Path) -> None:
     repository.create_session(session)
     repository.set_cache("rail", "query", {"ok": True}, 60)
 
-    assert repository.list_recoverable_sessions()[0].session_id == session.session_id
+    assert repository.list_recoverable_sessions()[0][1].session_id == session.session_id
     assert repository.get_cache("rail", "query") == {"ok": True}
     repository.set_cache("rail", "expired", {"ok": True}, 0)
     assert repository.get_cache("rail", "expired") is None

@@ -6,10 +6,7 @@
 
 from __future__ import annotations
 
-import sqlite3
 import unicodedata
-from contextlib import closing
-from pathlib import Path
 from typing import Any, Literal, cast
 
 from psycopg import Error as PsycopgError
@@ -195,97 +192,6 @@ class PostgresCatalogRepository:
         stats = self._pool.get_stats()
         keys = ("pool_size", "pool_available", "requests_waiting")
         return {key: int(stats.get(key, 0)) for key in keys}
-
-
-class SqliteCatalogRepository:
-    """显式回滚开关使用的旧 SQLite 目录，不作为正常运行路径。"""
-
-    SEARCH_RADIUS = 0.8
-
-    def __init__(self, database_path: str) -> None:
-        self.database_path = Path(database_path)
-
-    @property
-    def available(self) -> bool:
-        """判断旧目录文件是否存在。"""
-
-        return self.database_path.is_file()
-
-    def resolve_city(self, destination: str) -> City:
-        """按旧 SQLite 别名索引解析城市。"""
-
-        if not self.available:
-            raise LookupError("旧 SQLite 地点目录尚未生成")
-        with closing(self._connect()) as connection:
-            row = connection.execute(
-                """
-                SELECT c.name, c.latitude, c.longitude
-                FROM city_aliases a JOIN cities c ON c.city_id = a.city_id
-                WHERE a.alias = ? ORDER BY a.population DESC LIMIT 1
-                """,
-                (destination.strip(),),
-            ).fetchone()
-        if row is None:
-            raise LookupError(f"旧目录未覆盖城市：{destination}")
-        return City(name=row["name"], latitude=row["latitude"], longitude=row["longitude"])
-
-    def search_candidates(self, city: City) -> CandidateCatalog:
-        """从旧 SQLite 目录读取三类 POI。"""
-
-        if city.latitude is None or city.longitude is None:
-            raise LookupError("旧目录中的城市缺少坐标")
-        catalog = _candidate_catalog(self._search(city))
-        if not catalog.attractions:
-            raise LookupError(f"旧目录没有找到城市附近的景点：{city.name}")
-        return catalog
-
-    def readiness(self) -> dict[str, object]:
-        """返回回滚目录状态。"""
-
-        return {"status": "ready" if self.available else "missing", "pool": {}}
-
-    def close(self) -> None:
-        """SQLite 查询按次连接，无常驻资源需要释放。"""
-
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.database_path)
-        connection.row_factory = sqlite3.Row
-        return connection
-
-    def _search(self, city: City) -> list[sqlite3.Row]:
-        latitude = city.latitude or 0
-        longitude = city.longitude or 0
-        radius = self.SEARCH_RADIUS
-        with closing(self._connect()) as connection:
-            rows = connection.execute(
-                """
-                WITH ranked AS (
-                    SELECT poi_id AS locationid, name AS canonicalname, address, category,
-                           type_name AS typename, image_url AS imageurl, latitude, longitude,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY category
-                               ORDER BY ((latitude - ?) * (latitude - ?)
-                                       + (longitude - ?) * (longitude - ?))
-                           ) AS categoryrank
-                    FROM pois
-                    WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
-                )
-                SELECT * FROM ranked
-                WHERE categoryrank <= CASE category
-                    WHEN 'attraction' THEN 12 WHEN 'restaurant' THEN 12 ELSE 8 END
-                """,
-                (
-                    latitude,
-                    latitude,
-                    longitude,
-                    longitude,
-                    latitude - radius,
-                    latitude + radius,
-                    longitude - radius,
-                    longitude + radius,
-                ),
-            ).fetchall()
-        return list(rows)
 
 
 def normalize_location_name(value: str) -> str:

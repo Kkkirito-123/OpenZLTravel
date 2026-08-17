@@ -11,9 +11,9 @@ from app.config import Settings
 from app.errors import CatalogUnavailableError, ProviderError
 from app.models import City, Poi
 from app.providers import AmapScheduler, HybridMapProvider, OpenMeteoClient
-from app.storage import SqliteTripRepository
 from app.travel import TravelService
 from tests.fakes import FakeMapProvider, FakePlanner, sample_catalog, sample_request
+from tests.sqlite_repository import SqliteTripRepository
 
 
 def poi(poi_id: str, latitude: float = 30.1, longitude: float = 120.1) -> Poi:

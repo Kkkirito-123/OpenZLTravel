@@ -22,7 +22,7 @@ from re_zlagent.harness.conversation import (  # type: ignore[import-untyped]
     ConversationManager,
     ConversationPolicy,
     ModelConversationSummarizer,
-    SqliteConversationStore,
+    PooledPostgresConversationStore,
 )
 from re_zlagent.harness.model import (  # type: ignore[import-untyped]
     ModelCallBudget,
@@ -30,10 +30,11 @@ from re_zlagent.harness.model import (  # type: ignore[import-untyped]
 )
 
 from app.assistant import TravelAssistantService
-from app.catalog import PostgresCatalogRepository, SqliteCatalogRepository
+from app.catalog import PostgresCatalogRepository
 from app.config import Settings
 from app.dialogue import PromptCacheTransport, TravelCommandGenerator
 from app.errors import AppError
+from app.identity import AnonymousIdentityService
 from app.models import (
     AssistantMessageRequest,
     AssistantSessionView,
@@ -52,6 +53,7 @@ from app.models import (
     TravelRequest,
     TripAlternatives,
     TripSummary,
+    VisitorClaimRequest,
 )
 from app.providers import (
     AmapClient,
@@ -69,7 +71,7 @@ from app.providers import (
 )
 from app.runtime import PlanningRuntime
 from app.skills import list_skill_views
-from app.storage import SqliteTripRepository
+from app.storage import PostgresTravelRepository, create_conversation_pool
 from app.travel import TravelService, itinerary_to_markdown
 from app.workflow import WorkbenchWorkflow
 
@@ -81,7 +83,16 @@ class ApplicationContainer:
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings()
-        self.repository = SqliteTripRepository(self.settings.database_path)
+        self.repository = PostgresTravelRepository(
+            self.settings.database_url,
+            min_size=self.settings.database_pool_min_size,
+            max_size=self.settings.database_pool_max_size,
+            timeout_seconds=self.settings.database_pool_timeout_seconds,
+        )
+        self.identity = AnonymousIdentityService(
+            self.repository,
+            secure_cookie=self.settings.visitor_cookie_secure,
+        )
         self.catalog = self._catalog_repository()
         self.amap_client = AmapClient(self.settings, self.repository)
         self.weather_client = OpenMeteoClient(self.settings, self.repository)
@@ -141,7 +152,13 @@ class ApplicationContainer:
         self.runtime = PlanningRuntime(
             self.repository, self.travel, workflow, self.rail, self.hotels
         )
-        self.conversation_store = SqliteConversationStore(self.settings.database_path)
+        self.conversation_pool = create_conversation_pool(
+            self.settings.database_url,
+            min_size=self.settings.conversation_pool_min_size,
+            max_size=self.settings.conversation_pool_max_size,
+            timeout_seconds=self.settings.database_pool_timeout_seconds,
+        )
+        self.conversation_store = PooledPostgresConversationStore(self.conversation_pool)
         intent_model = self._intent_model()
         summarizer = (
             ModelConversationSummarizer(
@@ -193,11 +210,9 @@ class ApplicationContainer:
             self.settings.provider_cooldown_seconds,
         )
 
-    def _catalog_repository(self) -> PostgresCatalogRepository | SqliteCatalogRepository:
-        """默认使用 PostgreSQL；旧 SQLite 只能通过显式开关回滚。"""
+    def _catalog_repository(self) -> PostgresCatalogRepository:
+        """建立公共地点库的独立有界连接池。"""
 
-        if self.settings.catalog_sqlite_rollback:
-            return SqliteCatalogRepository(self.settings.catalog_path)
         return PostgresCatalogRepository(
             self.settings.catalog_database_url,
             min_size=self.settings.catalog_pool_min_size,
@@ -227,10 +242,12 @@ class ApplicationContainer:
     def readiness(self) -> dict[str, object]:
         """返回不触发外部请求的本地就绪状态。"""
 
+        database = self.repository.readiness()
         catalog = self.catalog.readiness()
+        ready = database == "ready" and catalog["status"] == "ready"
         return {
-            "status": "ready" if catalog["status"] == "ready" else "not_ready",
-            "database": "ok",
+            "status": "ready" if ready else "not_ready",
+            "database": database,
             "catalog": catalog["status"],
             "catalog_pool": catalog["pool"],
             "rail_mcp": "configured" if self.settings.rail_mcp_url else "missing",
@@ -266,6 +283,8 @@ class ApplicationContainer:
             except Exception:
                 LOGGER.exception("map_client_close_failed")
         self.conversation_store.close()
+        self.conversation_pool.close()
+        self.repository.close()
         self.catalog.close()
 
 
@@ -292,6 +311,22 @@ def get_assistant_service() -> TravelAssistantService:
     """返回多轮旅行助手应用服务。"""
 
     return get_container().assistant
+
+
+def get_identity_service() -> AnonymousIdentityService:
+    """返回匿名访客身份服务。"""
+
+    return get_container().identity
+
+
+def get_visitor_id(
+    request: Request,
+    response: Response,
+    identity: AnonymousIdentityService = Depends(get_identity_service),
+) -> UUID:
+    """为受保护接口解析或创建浏览器级匿名身份。"""
+
+    return identity.resolve(request, response)
 
 
 @asynccontextmanager
@@ -387,11 +422,12 @@ def ready() -> dict[str, object]:
     status_code=status.HTTP_201_CREATED,
 )
 def create_assistant_session(
+    visitor_id: UUID = Depends(get_visitor_id),
     service: TravelAssistantService = Depends(get_assistant_service),
 ) -> AssistantSessionView:
     """创建一个可恢复的多轮旅行助手会话。"""
 
-    return service.create()
+    return service.create(visitor_id)
 
 
 @app.get("/api/assistant-skills", response_model=list[AssistantSkillView])
@@ -401,23 +437,36 @@ def list_assistant_skills() -> list[AssistantSkillView]:
     return list_skill_views()
 
 
+@app.post("/api/visitor/claim", status_code=status.HTTP_204_NO_CONTENT)
+def claim_legacy_data(
+    claim: VisitorClaimRequest,
+    visitor_id: UUID = Depends(get_visitor_id),
+    identity: AnonymousIdentityService = Depends(get_identity_service),
+) -> None:
+    """用一次性认领码把旧 SQLite 数据转移给当前浏览器。"""
+
+    identity.claim(visitor_id, claim.token)
+
+
 @app.get("/api/assistant-memories", response_model=list[TravelMemory])
 def list_assistant_memories(
+    visitor_id: UUID = Depends(get_visitor_id),
     service: TravelAssistantService = Depends(get_assistant_service),
 ) -> list[TravelMemory]:
     """返回用户明确保存的长期旅行偏好。"""
 
-    return service.list_memories()
+    return service.list_memories(visitor_id)
 
 
 @app.delete("/api/assistant-memories/{key}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_assistant_memory(
     key: MemorySlotName,
+    visitor_id: UUID = Depends(get_visitor_id),
     service: TravelAssistantService = Depends(get_assistant_service),
 ) -> Response:
     """删除一项长期偏好，不改变已有会话任务事实。"""
 
-    service.delete_memory(key)
+    service.delete_memory(key, visitor_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -427,11 +476,12 @@ def delete_assistant_memory(
 )
 async def get_assistant_session(
     session_id: UUID,
+    visitor_id: UUID = Depends(get_visitor_id),
     service: TravelAssistantService = Depends(get_assistant_service),
 ) -> AssistantSessionView:
     """恢复助手状态和近期完整对话轮次。"""
 
-    return await service.get(session_id)
+    return await service.get(session_id, visitor_id)
 
 
 @app.post(
@@ -441,11 +491,12 @@ async def get_assistant_session(
 async def send_assistant_message(
     session_id: UUID,
     message: AssistantMessageRequest,
+    visitor_id: UUID = Depends(get_visitor_id),
     service: TravelAssistantService = Depends(get_assistant_service),
 ) -> AssistantTurnResponse:
     """识别一条消息并推进确定性旅行 Flow。"""
 
-    return await service.send(session_id, message)
+    return await service.send(session_id, message, visitor_id)
 
 
 @app.post(
@@ -456,42 +507,47 @@ async def send_assistant_message(
 async def create_planning_session(
     request: PlanningRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    visitor_id: UUID = Depends(get_visitor_id),
     runtime: PlanningRuntime = Depends(get_planning_runtime),
 ) -> PlanningSession:
     """创建后台规划会话并立即返回。"""
 
-    return runtime.start(request, idempotency_key)
+    return runtime.start(request, idempotency_key, visitor_id)
 
 
 @app.get("/api/planning-sessions/{session_id}", response_model=PlanningSession)
 def get_planning_session(
-    session_id: UUID, runtime: PlanningRuntime = Depends(get_planning_runtime)
+    session_id: UUID,
+    visitor_id: UUID = Depends(get_visitor_id),
+    runtime: PlanningRuntime = Depends(get_planning_runtime),
 ) -> PlanningSession:
     """轮询规划会话及独立步骤状态。"""
 
-    return runtime.get(session_id)
+    return runtime.get(session_id, visitor_id)
 
 
 @app.put("/api/planning-sessions/{session_id}/selection", response_model=PlanningSession)
 async def update_selection(
     session_id: UUID,
     selection: PlanningSelection,
+    visitor_id: UUID = Depends(get_visitor_id),
     runtime: PlanningRuntime = Depends(get_planning_runtime),
 ) -> PlanningSession:
     """保存用户选择的车次与酒店。"""
 
-    return await runtime.update_selection(session_id, selection)
+    return await runtime.update_selection(session_id, selection, visitor_id)
 
 
 @app.post("/api/planning-sessions/{session_id}/rail/transfers", response_model=list[RailOption])
 async def search_transfers(
     session_id: UUID,
     request: TransferSearchRequest,
+    visitor_id: UUID = Depends(get_visitor_id),
     runtime: PlanningRuntime = Depends(get_planning_runtime),
 ) -> list[RailOption]:
     """按方向加载一次中转方案。"""
 
-    return await runtime.search_transfers(session_id, request.direction)
+    return await runtime.search_transfers(session_id, request.direction, visitor_id)
 
 
 @app.get(
@@ -501,11 +557,12 @@ async def search_transfers(
 async def get_hotel_detail(
     session_id: UUID,
     hotel_id: str,
+    visitor_id: UUID = Depends(get_visitor_id),
     runtime: PlanningRuntime = Depends(get_planning_runtime),
 ) -> HotelDetail:
     """懒加载一个酒店的房型和退改规则。"""
 
-    return await runtime.hotel_detail(session_id, hotel_id)
+    return await runtime.hotel_detail(session_id, hotel_id, visitor_id)
 
 
 @app.post(
@@ -514,11 +571,13 @@ async def get_hotel_detail(
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def generate_session(
-    session_id: UUID, runtime: PlanningRuntime = Depends(get_planning_runtime)
+    session_id: UUID,
+    visitor_id: UUID = Depends(get_visitor_id),
+    runtime: PlanningRuntime = Depends(get_planning_runtime),
 ) -> PlanningSession:
     """调度确定性行程生成并立即返回。"""
 
-    return await runtime.generate(session_id)
+    return await runtime.generate(session_id, visitor_id)
 
 
 @app.post(
@@ -527,57 +586,71 @@ async def generate_session(
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def retry_session(
-    session_id: UUID, runtime: PlanningRuntime = Depends(get_planning_runtime)
+    session_id: UUID,
+    visitor_id: UUID = Depends(get_visitor_id),
+    runtime: PlanningRuntime = Depends(get_planning_runtime),
 ) -> PlanningSession:
     """重试失败的发现或生成阶段。"""
 
-    return await runtime.retry(session_id)
+    return await runtime.retry(session_id, visitor_id)
 
 
 @app.delete("/api/planning-sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def cancel_session(
-    session_id: UUID, runtime: PlanningRuntime = Depends(get_planning_runtime)
+    session_id: UUID,
+    visitor_id: UUID = Depends(get_visitor_id),
+    runtime: PlanningRuntime = Depends(get_planning_runtime),
 ) -> Response:
     """取消后台任务并保留取消状态供页面确认。"""
 
-    await runtime.cancel(session_id)
+    await runtime.cancel(session_id, visitor_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.post("/api/trips", response_model=Itinerary, status_code=status.HTTP_201_CREATED)
 async def create_trip(
-    request: TravelRequest, service: TravelService = Depends(get_travel_service)
+    request: TravelRequest,
+    visitor_id: UUID = Depends(get_visitor_id),
+    service: TravelService = Depends(get_travel_service),
 ) -> Itinerary:
     """兼容旧客户端的快速规划入口。"""
 
-    return await service.create_async(request)
+    return await service.create_async(request, visitor_id)
 
 
 @app.get("/api/trips", response_model=list[TripSummary])
-def list_trips(service: TravelService = Depends(get_travel_service)) -> list[TripSummary]:
+def list_trips(
+    visitor_id: UUID = Depends(get_visitor_id),
+    service: TravelService = Depends(get_travel_service),
+) -> list[TripSummary]:
     """返回历史行程摘要。"""
 
-    return service.list()
+    return service.list(visitor_id)
 
 
 @app.get("/api/trips/{trip_id}", response_model=Itinerary)
-def get_trip(trip_id: UUID, service: TravelService = Depends(get_travel_service)) -> Itinerary:
+def get_trip(
+    trip_id: UUID,
+    visitor_id: UUID = Depends(get_visitor_id),
+    service: TravelService = Depends(get_travel_service),
+) -> Itinerary:
     """返回一份完整行程。"""
 
-    return service.get(trip_id)
+    return service.get(trip_id, visitor_id)
 
 
 @app.get("/api/trips/{trip_id}/alternatives", response_model=TripAlternatives)
 def get_alternatives(
     trip_id: UUID,
+    visitor_id: UUID = Depends(get_visitor_id),
     runtime: PlanningRuntime = Depends(get_planning_runtime),
 ) -> TripAlternatives:
     """返回编辑时可替换的真实景点候选。"""
 
-    session = runtime.get(trip_id)
+    session = runtime.get(trip_id, visitor_id)
     if session.candidates is None:
         raise AppError("alternatives_unavailable", "当前行程没有可用候选地点", 404)
-    return runtime.travel_service.alternatives(trip_id, session.candidates)
+    return runtime.travel_service.alternatives(trip_id, session.candidates, visitor_id)
 
 
 @app.patch("/api/trips/{trip_id}/days/{day_index}", response_model=Itinerary)
@@ -585,31 +658,44 @@ async def edit_trip_day(
     trip_id: UUID,
     day_index: int,
     edit: DayEditRequest,
+    visitor_id: UUID = Depends(get_visitor_id),
     runtime: PlanningRuntime = Depends(get_planning_runtime),
 ) -> Itinerary:
     """编辑一天并重算该日路线与预算。"""
 
-    session = runtime.get(trip_id)
+    session = runtime.get(trip_id, visitor_id)
     if session.candidates is None:
         raise AppError("alternatives_unavailable", "当前行程没有可用候选地点", 404)
-    return await runtime.travel_service.edit_day(trip_id, day_index, edit, session.candidates)
+    return await runtime.travel_service.edit_day(
+        trip_id,
+        day_index,
+        edit,
+        session.candidates,
+        visitor_id,
+    )
 
 
 @app.delete("/api/trips/{trip_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_trip(trip_id: UUID, service: TravelService = Depends(get_travel_service)) -> Response:
+def delete_trip(
+    trip_id: UUID,
+    visitor_id: UUID = Depends(get_visitor_id),
+    service: TravelService = Depends(get_travel_service),
+) -> Response:
     """删除指定历史行程。"""
 
-    service.delete(trip_id)
+    service.delete(trip_id, visitor_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @app.get("/api/trips/{trip_id}/export/markdown", response_class=PlainTextResponse)
 def export_markdown(
-    trip_id: UUID, service: TravelService = Depends(get_travel_service)
+    trip_id: UUID,
+    visitor_id: UUID = Depends(get_visitor_id),
+    service: TravelService = Depends(get_travel_service),
 ) -> PlainTextResponse:
     """导出指定行程的 Markdown 文本。"""
 
-    content = itinerary_to_markdown(service.get(trip_id))
+    content = itinerary_to_markdown(service.get(trip_id, visitor_id))
     return PlainTextResponse(
         content,
         headers={"Content-Disposition": f'attachment; filename="trip-{trip_id}.md"'},

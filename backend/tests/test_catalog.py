@@ -2,20 +2,14 @@
 
 from __future__ import annotations
 
-import sqlite3
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any
 from uuid import UUID
 
 import pytest
 from psycopg import OperationalError
 
-from app.catalog import (
-    PostgresCatalogRepository,
-    SqliteCatalogRepository,
-    normalize_location_name,
-)
+from app.catalog import PostgresCatalogRepository, normalize_location_name
 from app.errors import CatalogUnavailableError
 
 
@@ -148,36 +142,6 @@ def test_postgres_catalog_missing_configuration_is_not_amap_fallback() -> None:
     assert repository.available
     with pytest.raises(CatalogUnavailableError):
         repository.resolve_city("西安")
-
-
-def test_sqlite_catalog_remains_an_explicit_rollback_path(tmp_path: Path) -> None:
-    database = tmp_path / "catalog.sqlite3"
-    with sqlite3.connect(database) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE cities (
-                city_id INTEGER PRIMARY KEY, name TEXT, latitude REAL,
-                longitude REAL, population INTEGER
-            );
-            CREATE TABLE city_aliases (alias TEXT, city_id INTEGER, population INTEGER);
-            CREATE TABLE pois (
-                poi_id TEXT, name TEXT, address TEXT, category TEXT, latitude REAL,
-                longitude REAL, type_name TEXT, image_url TEXT
-            );
-            INSERT INTO cities VALUES (1, '杭州市', 30.27, 120.15, 12000000);
-            INSERT INTO city_aliases VALUES ('杭州', 1, 12000000);
-            INSERT INTO pois VALUES (
-                'legacy-attraction', '西湖', '', 'attraction', 30.25, 120.15, '湖泊', NULL
-            );
-            """
-        )
-    repository = SqliteCatalogRepository(str(database))
-
-    city = repository.resolve_city("杭州")
-    catalog = repository.search_candidates(city)
-
-    assert city.name == "杭州市"
-    assert catalog.attractions[0].id == "legacy-attraction"
 
 
 def _poi_rows() -> list[dict[str, object]]:

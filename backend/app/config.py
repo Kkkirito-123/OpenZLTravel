@@ -69,15 +69,18 @@ class Settings:
     provider_concurrency: int = int(os.getenv("PROVIDER_CONCURRENCY", "4"))
     provider_failure_threshold: int = int(os.getenv("PROVIDER_FAILURE_THRESHOLD", "3"))
     provider_cooldown_seconds: float = float(os.getenv("PROVIDER_COOLDOWN_SECONDS", "30"))
-    database_path: str = os.getenv(
-        "DATABASE_PATH", str(BACKEND_ROOT / "db" / "openzltravel.sqlite3")
+    database_url: str = os.getenv("DATABASE_URL", os.getenv("CATALOG_DATABASE_URL", ""))
+    database_pool_min_size: int = int(os.getenv("DATABASE_POOL_MIN_SIZE", "2"))
+    database_pool_max_size: int = int(os.getenv("DATABASE_POOL_MAX_SIZE", "20"))
+    database_pool_timeout_seconds: float = float(
+        os.getenv("DATABASE_POOL_TIMEOUT_SECONDS", "5")
     )
+    conversation_pool_min_size: int = int(os.getenv("CONVERSATION_POOL_MIN_SIZE", "1"))
+    conversation_pool_max_size: int = int(os.getenv("CONVERSATION_POOL_MAX_SIZE", "4"))
+    visitor_cookie_secure: bool = os.getenv("VISITOR_COOKIE_SECURE", "false").lower() == "true"
     amap_js_key: str = os.getenv("VITE_AMAP_JS_KEY", "")
     catalog_database_url: str = os.getenv("CATALOG_DATABASE_URL", "")
     catalog_pool_min_size: int = int(os.getenv("CATALOG_POOL_MIN_SIZE", "1"))
     catalog_pool_max_size: int = int(os.getenv("CATALOG_POOL_MAX_SIZE", "4"))
     catalog_pool_timeout_seconds: float = float(os.getenv("CATALOG_POOL_TIMEOUT_SECONDS", "3"))
-    # 仅用于 PostgreSQL 切换初期的显式回滚，默认运行路径不会再读取 SQLite 地点目录。
-    catalog_sqlite_rollback: bool = os.getenv("CATALOG_SQLITE_ROLLBACK", "false").lower() == "true"
-    catalog_path: str = os.getenv("CATALOG_PATH", str(BACKEND_ROOT / "data" / "catalog.sqlite3"))
     allow_amap_fallback: bool = os.getenv("ALLOW_AMAP_FALLBACK", "true").lower() == "true"

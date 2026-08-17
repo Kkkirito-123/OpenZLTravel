@@ -1,21 +1,26 @@
-"""OpenZLTravel 的行程持久化接口与 SQLite 实现。
+"""PostgreSQL 业务持久化。
 
-数据库只保存请求快照和最终行程 JSON。MVP 不提前拆成几十张业务表，读取时由
-Pydantic 负责结构校验，既保持简单，也便于未来迁移。
+本模块集中访客、行程、规划、对话、长期偏好和临时 Provider 缓存。业务服务只传入
+``visitorid`` 和领域模型，不接触 psycopg 行、SQL 或连接池对象。
 """
 
 from __future__ import annotations
 
 import builtins
-import json
-import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from psycopg import Connection
+from psycopg import Error as PsycopgError
+from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool, PoolTimeout
+
+from app.errors import DatabaseUnavailableError
 from app.models import (
     AssistantTurnResponse,
     Itinerary,
@@ -27,126 +32,85 @@ from app.models import (
     TripSummary,
 )
 
+# 零 UUID 只用于旧内部调用和测试兼容；真实 HTTP 请求始终由匿名 Cookie 注入随机访客 ID。
+UNSCOPED_VISITOR_ID = UUID(int=0)
+
+
+class RepositoryConflictError(Exception):
+    """数据库乐观锁或幂等约束冲突。"""
+
 
 class TripRepository(Protocol):
-    """行程持久化接口，业务服务只依赖这些最小能力。"""
+    """行程持久化接口。"""
 
-    def save(self, itinerary: Itinerary, request: TravelRequest) -> None:
-        """保存请求与完整行程快照。"""
-
-        ...
+    def save(self, itinerary: Itinerary, request: TravelRequest, visitor_id: UUID) -> None:
+        """保存已完成行程。"""
 
     def save_if_revision(
         self,
         itinerary: Itinerary,
         request: TravelRequest,
         expected_revision: int,
+        visitor_id: UUID,
     ) -> bool:
-        """仅当当前版本仍匹配时保存行程，返回是否成功提交。"""
+        """按期望版本提交编辑。"""
 
-        ...
+    def get(self, trip_id: UUID, visitor_id: UUID) -> Itinerary | None:
+        """读取当前访客的行程。"""
 
-    def get(self, trip_id: UUID) -> Itinerary | None:
-        """按 ID 读取完整行程。"""
+    def list(self, visitor_id: UUID) -> list[TripSummary]:
+        """列出当前访客的行程。"""
 
-        ...
+    def delete(self, trip_id: UUID, visitor_id: UUID) -> bool:
+        """删除当前访客的行程。"""
 
-    def list(self) -> list[TripSummary]:
-        """按创建时间倒序返回历史摘要。"""
-
-        ...
-
-    def delete(self, trip_id: UUID) -> bool:
-        """删除行程，并返回是否命中记录。"""
-
-        ...
-
-    def get_request(self, trip_id: UUID) -> TravelRequest | None:
-        """读取生成行程时的请求快照。"""
-
-        ...
+    def get_request(self, trip_id: UUID, visitor_id: UUID) -> TravelRequest | None:
+        """读取行程请求快照。"""
 
 
 class PlanningRepository(Protocol):
-    """规划运行时所需的会话与缓存持久化能力。"""
+    """规划运行时持久化接口。"""
 
     def create_session(
-        self, session: PlanningSession, idempotency_key: str | None = None
+        self,
+        session: PlanningSession,
+        idempotency_key: str | None,
+        visitor_id: UUID,
     ) -> PlanningSession:
-        """创建会话；相同幂等键返回已经存在的会话。"""
+        """按访客和幂等键创建会话。"""
 
-        ...
+    def save_session(self, session: PlanningSession, visitor_id: UUID) -> None:
+        """保存规划会话。"""
 
-    def save_session(self, session: PlanningSession) -> None:
-        """保存完整会话快照。"""
+    def get_session(self, session_id: UUID, visitor_id: UUID) -> PlanningSession | None:
+        """读取当前访客的规划会话。"""
 
-        ...
+    def delete_session(self, session_id: UUID, visitor_id: UUID) -> bool:
+        """删除当前访客的规划会话。"""
 
-    def get_session(self, session_id: UUID) -> PlanningSession | None:
-        """按 ID 读取规划会话。"""
-
-        ...
-
-    def delete_session(self, session_id: UUID) -> bool:
-        """删除规划会话。"""
-
-        ...
-
-    def list_recoverable_sessions(self) -> builtins.list[PlanningSession]:
-        """返回进程重启后需要恢复的会话。"""
-
-        ...
-
-    def get_cache(self, provider: str, key: str) -> Any | None:
-        """读取未过期的供应商缓存。"""
-
-        ...
-
-    def set_cache(self, provider: str, key: str, value: Any, ttl_seconds: int) -> None:
-        """写入带过期时间的供应商缓存。"""
-
-        ...
+    def list_recoverable_sessions(self) -> list[tuple[UUID, PlanningSession]]:
+        """返回全部访客中断的任务及其所有者。"""
 
 
 class DialogueRepository(Protocol):
-    """旅行助手状态和消息幂等结果的持久化边界。"""
+    """旅行助手状态、幂等消息和长期偏好接口。"""
 
-    def create_dialogue(self, state: TravelDialogueState) -> None:
-        """创建一份新的旅行对话状态。"""
+    def create_dialogue(self, state: TravelDialogueState, visitor_id: UUID) -> None:
+        """创建当前访客的助手会话。"""
 
-        ...
-
-    def get_dialogue(self, session_id: UUID) -> TravelDialogueState | None:
-        """读取旅行对话状态。"""
-
-        ...
+    def get_dialogue(self, session_id: UUID, visitor_id: UUID) -> TravelDialogueState | None:
+        """读取当前访客的助手会话。"""
 
     def get_dialogue_response(
-        self, session_id: UUID, message_id: UUID
+        self, session_id: UUID, message_id: UUID, visitor_id: UUID
     ) -> tuple[str, AssistantTurnResponse] | None:
-        """读取一条已经处理过的消息及其响应。"""
+        """读取一条幂等消息结果。"""
 
-        ...
+    def list_memories(self, visitor_id: UUID) -> builtins.list[TravelMemory]:
+        """读取当前访客长期偏好。"""
 
-    def list_memories(self) -> builtins.list[TravelMemory]:
-        """读取用户明确保存的全部长期偏好。"""
-
-        ...
-
-    def delete_memory(self, key: MemorySlotName) -> bool:
-        """删除一项长期偏好。"""
-
-        ...
-
-    def get_cache(self, provider: str, key: str) -> Any | None:
-        """读取助手的短期结果缓存。"""
-
-        ...
-
-    def set_cache(self, provider: str, key: str, value: Any, ttl_seconds: int) -> None:
-        """保存助手的短期结果缓存。"""
-
-        ...
+    def delete_memory(self, key: MemorySlotName, visitor_id: UUID) -> bool:
+        """删除当前访客一项长期偏好。"""
 
     def save_dialogue_response(
         self,
@@ -154,128 +118,94 @@ class DialogueRepository(Protocol):
         message_id: UUID,
         request_content: str,
         response: AssistantTurnResponse,
+        visitor_id: UUID,
         memory_upserts: dict[MemorySlotName, str | builtins.list[str]] | None = None,
         memory_deletes: set[MemorySlotName] | None = None,
     ) -> None:
-        """原子保存新状态、幂等响应和显式长期记忆变更。"""
-
-        ...
+        """原子保存状态、响应与偏好变更。"""
 
 
-class SqliteTripRepository:
-    """基于标准库 sqlite3 的单用户行程仓库。"""
+class PostgresTravelRepository:
+    """使用有界连接池保存多人共享业务状态。"""
 
-    def __init__(self, database_path: str) -> None:
-        self.database_path = Path(database_path)
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        self._create_tables()
+    def __init__(
+        self,
+        database_url: str,
+        min_size: int = 2,
+        max_size: int = 20,
+        timeout_seconds: float = 5,
+        pool: Any | None = None,
+    ) -> None:
+        self.timeout_seconds = timeout_seconds
+        self._pool = pool if pool is not None else _create_pool(
+            database_url, min_size, max_size, timeout_seconds
+        )
 
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        """开启一个短事务，并在成功或异常退出时显式关闭连接。"""
+    @property
+    def pool(self) -> Any:
+        """仅供同模块基础设施复用；业务服务不得访问。"""
 
-        connection = sqlite3.connect(self.database_path, timeout=5)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout = 5000")
+        return self._pool
+
+    def close(self) -> None:
+        """关闭业务连接池。"""
+
+        if self._pool is not None:
+            self._pool.close()
+
+    def readiness(self) -> str:
+        """检查 app Schema 是否可读。"""
+
         try:
-            with connection:
-                yield connection
-        finally:
-            connection.close()
+            with self._connection() as connection:
+                connection.execute("SELECT version FROM app.schemaversion LIMIT 1").fetchone()
+        except DatabaseUnavailableError:
+            return "unavailable"
+        return "ready"
 
-    def _create_tables(self) -> None:
-        with self._connect() as connection:
-            connection.execute("PRAGMA journal_mode = WAL")
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS trips (
-                    trip_id TEXT PRIMARY KEY,
-                    destination TEXT NOT NULL,
-                    start_date TEXT NOT NULL,
-                    end_date TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    request_json TEXT NOT NULL,
-                    itinerary_json TEXT NOT NULL
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS planning_sessions (
-                    session_id TEXT PRIMARY KEY,
-                    idempotency_key TEXT UNIQUE,
-                    status TEXT NOT NULL,
-                    request_json TEXT NOT NULL,
-                    session_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS provider_cache (
-                    provider TEXT NOT NULL,
-                    cache_key TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    expires_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (provider, cache_key)
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS travel_dialogue_sessions (
-                    session_id TEXT PRIMARY KEY,
-                    revision INTEGER NOT NULL,
-                    status TEXT NOT NULL,
-                    active_flow TEXT,
-                    state_json TEXT NOT NULL,
-                    planning_session_id TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS travel_dialogue_requests (
-                    session_id TEXT NOT NULL,
-                    message_id TEXT NOT NULL,
-                    response_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (session_id, message_id)
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS travel_memories (
-                    memory_key TEXT PRIMARY KEY,
-                    value_json TEXT NOT NULL,
-                    version INTEGER NOT NULL,
-                    source_session_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
+    def get_or_create_visitor(self, token_hash: str, expires_at: datetime) -> UUID:
+        """只保存随机 Token 哈希，泄露数据库时不能还原浏览器 Cookie。"""
 
-    def save(self, itinerary: Itinerary, request: TravelRequest) -> None:
-        """保存完整快照；同一 ID 使用替换，便于后续支持重新生成。"""
-
-        values = _trip_values(itinerary, request)
-        with self._connect() as connection:
-            connection.execute(
+        visitor_id = uuid4()
+        now = _now()
+        with self._connection() as connection:
+            row = connection.execute(
                 """
-                INSERT OR REPLACE INTO trips
-                (trip_id, destination, start_date, end_date, summary, created_at,
-                 request_json, itinerary_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO app.visitor
+                    (visitorid, tokenhash, createdat, lastseenat, expiresat)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (tokenhash) DO UPDATE SET
+                    lastseenat = excluded.lastseenat,
+                    expiresat = GREATEST(app.visitor.expiresat, excluded.expiresat)
+                RETURNING visitorid
                 """,
-                values,
+                (visitor_id, token_hash, now, now, expires_at),
+            ).fetchone()
+        if row is None:
+            raise DatabaseUnavailableError("创建匿名访客失败")
+        return UUID(str(row["visitorid"]))
+
+    def save(self, itinerary: Itinerary, request: TravelRequest, visitor_id: UUID) -> None:
+        """全部事实校验完成后保存；失败流程不得留下半成品。"""
+
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO app.trip
+                    (tripid, visitorid, destination, startdate, enddate, summary,
+                     createdat, requestjson, itineraryjson, revision)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (tripid) DO UPDATE SET
+                    destination = excluded.destination,
+                    startdate = excluded.startdate,
+                    enddate = excluded.enddate,
+                    summary = excluded.summary,
+                    requestjson = excluded.requestjson,
+                    itineraryjson = excluded.itineraryjson,
+                    revision = excluded.revision
+                WHERE app.trip.visitorid = excluded.visitorid
+                """,
+                _trip_values(itinerary, request, visitor_id),
             )
 
     def save_if_revision(
@@ -283,290 +213,237 @@ class SqliteTripRepository:
         itinerary: Itinerary,
         request: TravelRequest,
         expected_revision: int,
+        visitor_id: UUID,
     ) -> bool:
-        """在同一写事务内比较版本并更新，避免并发编辑互相覆盖。"""
+        """用条件 UPDATE 保证并发编辑只有一个版本成功。"""
 
-        values = _trip_values(itinerary, request)
-        with self._connect() as connection:
-            # 版本字段在 JSON 内，不能依赖跨连接的“先读再写”。先取得写锁后再比较，
-            # 使两个同时提交的编辑只有一个可以看到旧版本。
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT itinerary_json FROM trips WHERE trip_id = ?", (values[0],)
-            ).fetchone()
-            if row is None:
-                return False
-            stored = Itinerary.model_validate_json(row["itinerary_json"])
-            if stored.revision != expected_revision:
-                return False
+        with self._connection() as connection:
             cursor = connection.execute(
                 """
-                UPDATE trips
-                SET destination = ?, start_date = ?, end_date = ?, summary = ?,
-                    created_at = ?, request_json = ?, itinerary_json = ?
-                WHERE trip_id = ?
+                UPDATE app.trip SET
+                    destination = %s, startdate = %s, enddate = %s, summary = %s,
+                    requestjson = %s, itineraryjson = %s, revision = %s
+                WHERE tripid = %s AND visitorid = %s AND revision = %s
                 """,
-                (*values[1:], values[0]),
+                (
+                    itinerary.destination,
+                    itinerary.start_date,
+                    itinerary.end_date,
+                    itinerary.summary,
+                    Jsonb(request.model_dump(mode="json")),
+                    Jsonb(itinerary.model_dump(mode="json")),
+                    itinerary.revision,
+                    itinerary.trip_id,
+                    visitor_id,
+                    expected_revision,
+                ),
             )
         return cursor.rowcount == 1
 
-    def get(self, trip_id: UUID) -> Itinerary | None:
-        """读取已保存的完整行程，不存在时返回空值。"""
+    def get(self, trip_id: UUID, visitor_id: UUID) -> Itinerary | None:
+        """资源 ID 与 visitorid 必须同时匹配，避免跨访客枚举。"""
 
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT itinerary_json FROM trips WHERE trip_id = ?", (str(trip_id),)
-            ).fetchone()
-        return Itinerary.model_validate_json(row["itinerary_json"]) if row else None
+        row = self._fetch_one(
+            "SELECT itineraryjson FROM app.trip WHERE tripid = %s AND visitorid = %s",
+            (trip_id, visitor_id),
+        )
+        return Itinerary.model_validate(row["itineraryjson"]) if row else None
 
-    def get_request(self, trip_id: UUID) -> TravelRequest | None:
-        """读取请求快照，供局部编辑后重新计算预算使用。"""
+    def get_request(self, trip_id: UUID, visitor_id: UUID) -> TravelRequest | None:
+        """读取当前访客的原始需求快照。"""
 
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT request_json FROM trips WHERE trip_id = ?", (str(trip_id),)
-            ).fetchone()
-        return TravelRequest.model_validate_json(row["request_json"]) if row else None
+        row = self._fetch_one(
+            "SELECT requestjson FROM app.trip WHERE tripid = %s AND visitorid = %s",
+            (trip_id, visitor_id),
+        )
+        return TravelRequest.model_validate(row["requestjson"]) if row else None
 
-    def list(self) -> list[TripSummary]:
-        """按创建时间倒序读取历史行程摘要。"""
+    def list(self, visitor_id: UUID) -> builtins.list[TripSummary]:
+        """按创建时间倒序列出当前访客行程。"""
 
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT trip_id, destination, start_date, end_date, summary, created_at
-                FROM trips ORDER BY created_at DESC
-                """
-            ).fetchall()
-        return [
-            TripSummary(
-                trip_id=UUID(row["trip_id"]),
-                destination=row["destination"],
-                start_date=datetime.fromisoformat(row["start_date"]).date(),
-                end_date=datetime.fromisoformat(row["end_date"]).date(),
-                summary=row["summary"],
-                created_at=datetime.fromisoformat(row["created_at"]),
-            )
-            for row in rows
-        ]
+        rows = self._fetch_all(
+            """
+            SELECT tripid, destination, startdate, enddate, summary, createdat
+            FROM app.trip WHERE visitorid = %s ORDER BY createdat DESC
+            """,
+            (visitor_id,),
+        )
+        return [_trip_summary(row) for row in rows]
 
-    def delete(self, trip_id: UUID) -> bool:
-        """删除指定行程，并返回是否实际删除。"""
+    def delete(self, trip_id: UUID, visitor_id: UUID) -> bool:
+        """删除当前访客的行程。"""
 
-        with self._connect() as connection:
-            cursor = connection.execute("DELETE FROM trips WHERE trip_id = ?", (str(trip_id),))
-        return cursor.rowcount == 1
+        return self._delete(
+            "DELETE FROM app.trip WHERE tripid = %s AND visitorid = %s",
+            (trip_id, visitor_id),
+        )
 
     def create_session(
-        self, session: PlanningSession, idempotency_key: str | None = None
+        self,
+        session: PlanningSession,
+        idempotency_key: str | None,
+        visitor_id: UUID,
     ) -> PlanningSession:
-        """原子创建会话；双击提交时由唯一键复用原任务。"""
+        """数据库唯一约束是幂等的最终保障，不能只依赖进程内缓存。"""
 
-        try:
-            with self._connect() as connection:
-                connection.execute(
+        values = (
+            session.session_id,
+            visitor_id,
+            idempotency_key,
+            session.status,
+            Jsonb(session.request.model_dump(mode="json")),
+            Jsonb(session.model_dump(mode="json")),
+            session.created_at,
+            session.updated_at,
+        )
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                INSERT INTO app.planningsession
+                    (sessionid, visitorid, idempotencykey, status, requestjson,
+                     sessionjson, createdat, updatedat)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (visitorid, idempotencykey) DO NOTHING
+                RETURNING sessionjson
+                """,
+                values,
+            ).fetchone()
+            if row is None and idempotency_key:
+                row = connection.execute(
                     """
-                    INSERT INTO planning_sessions
-                    (session_id, idempotency_key, status, request_json, session_json,
-                     created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    SELECT sessionjson FROM app.planningsession
+                    WHERE visitorid = %s AND idempotencykey = %s
                     """,
-                    (
-                        str(session.session_id),
-                        idempotency_key,
-                        session.status,
-                        session.request.model_dump_json(),
-                        session.model_dump_json(),
-                        session.created_at.isoformat(),
-                        session.updated_at.isoformat(),
-                    ),
-                )
-            return session
-        except sqlite3.IntegrityError:
-            existing = self._get_session_by_idempotency(idempotency_key)
-            if existing is None:
-                raise
-            return existing
+                    (visitor_id, idempotency_key),
+                ).fetchone()
+        return PlanningSession.model_validate(row["sessionjson"]) if row else session
 
-    def save_session(self, session: PlanningSession) -> None:
-        """保存会话快照；步骤更新和最终状态使用同一数据源。"""
+    def save_session(self, session: PlanningSession, visitor_id: UUID) -> None:
+        """保存当前访客的规划会话快照。"""
 
-        with self._connect() as connection:
+        with self._connection() as connection:
             connection.execute(
                 """
-                UPDATE planning_sessions
-                SET status = ?, session_json = ?, updated_at = ?
-                WHERE session_id = ?
+                UPDATE app.planningsession
+                SET status = %s, sessionjson = %s, updatedat = %s
+                WHERE sessionid = %s AND visitorid = %s
                 """,
                 (
                     session.status,
-                    session.model_dump_json(),
-                    session.updated_at.isoformat(),
-                    str(session.session_id),
+                    Jsonb(session.model_dump(mode="json")),
+                    session.updated_at,
+                    session.session_id,
+                    visitor_id,
                 ),
             )
 
-    def get_session(self, session_id: UUID) -> PlanningSession | None:
-        """按 ID 读取完整会话快照。"""
+    def get_session(self, session_id: UUID, visitor_id: UUID) -> PlanningSession | None:
+        """读取当前访客的规划会话。"""
 
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT session_json FROM planning_sessions WHERE session_id = ?",
-                (str(session_id),),
-            ).fetchone()
-        return PlanningSession.model_validate_json(row["session_json"]) if row else None
+        row = self._fetch_one(
+            """
+            SELECT sessionjson FROM app.planningsession
+            WHERE sessionid = %s AND visitorid = %s
+            """,
+            (session_id, visitor_id),
+        )
+        return PlanningSession.model_validate(row["sessionjson"]) if row else None
 
-    def _get_session_by_idempotency(self, key: str | None) -> PlanningSession | None:
-        if not key:
-            return None
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT session_json FROM planning_sessions WHERE idempotency_key = ?",
-                (key,),
-            ).fetchone()
-        return PlanningSession.model_validate_json(row["session_json"]) if row else None
+    def delete_session(self, session_id: UUID, visitor_id: UUID) -> bool:
+        """删除当前访客的规划会话。"""
 
-    def delete_session(self, session_id: UUID) -> bool:
-        """删除一个尚未需要保留的规划会话。"""
-
-        with self._connect() as connection:
-            cursor = connection.execute(
-                "DELETE FROM planning_sessions WHERE session_id = ?", (str(session_id),)
-            )
-        return cursor.rowcount == 1
-
-    def list_recoverable_sessions(self) -> builtins.list[PlanningSession]:
-        """读取中断在发现或生成阶段的会话，供启动时重新调度。"""
-
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT session_json FROM planning_sessions
-                WHERE status IN ('searching', 'generating')
-                ORDER BY created_at
-                """
-            ).fetchall()
-        return [PlanningSession.model_validate_json(row["session_json"]) for row in rows]
-
-    def get_cache(self, provider: str, key: str) -> Any | None:
-        """读取未过期缓存，并顺手删除过期记录。"""
-
-        now = datetime.now(timezone.utc)
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT payload_json, expires_at FROM provider_cache
-                WHERE provider = ? AND cache_key = ?
-                """,
-                (provider, key),
-            ).fetchone()
-            if row and datetime.fromisoformat(row["expires_at"]) <= now:
-                connection.execute(
-                    "DELETE FROM provider_cache WHERE provider = ? AND cache_key = ?",
-                    (provider, key),
-                )
-                return None
-        return json.loads(row["payload_json"]) if row else None
-
-    def set_cache(self, provider: str, key: str, value: Any, ttl_seconds: int) -> None:
-        """使用 SQLite 原子替换缓存，避免 JSON 文件并发覆盖。"""
-
-        now = datetime.now(timezone.utc)
-        expires_at = datetime.fromtimestamp(now.timestamp() + ttl_seconds, timezone.utc)
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT OR REPLACE INTO provider_cache
-                (provider, cache_key, payload_json, expires_at, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    provider,
-                    key,
-                    json.dumps(value, ensure_ascii=False),
-                    expires_at.isoformat(),
-                    now.isoformat(),
-                ),
-            )
-
-    def create_dialogue(self, state: TravelDialogueState) -> None:
-        """创建旅行对话；会话 ID 冲突由调用方视为服务错误。"""
-
-        with self._connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO travel_dialogue_sessions
-                (session_id, revision, status, active_flow, state_json,
-                 planning_session_id, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(state.session_id),
-                    state.revision,
-                    state.status,
-                    state.active_flow,
-                    state.model_dump_json(),
-                    str(state.planning_session_id) if state.planning_session_id else None,
-                    state.created_at.isoformat(),
-                    state.updated_at.isoformat(),
-                ),
-            )
-
-    def get_dialogue(self, session_id: UUID) -> TravelDialogueState | None:
-        """按 ID 读取旅行对话的完整状态快照。"""
-
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT state_json FROM travel_dialogue_sessions WHERE session_id = ?",
-                (str(session_id),),
-            ).fetchone()
-        return TravelDialogueState.model_validate_json(row["state_json"]) if row else None
-
-    def get_dialogue_response(
-        self, session_id: UUID, message_id: UUID
-    ) -> tuple[str, AssistantTurnResponse] | None:
-        """读取幂等响应，同时保留原消息以检测 message_id 冲突。"""
-
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT response_json FROM travel_dialogue_requests
-                WHERE session_id = ? AND message_id = ?
-                """,
-                (str(session_id), str(message_id)),
-            ).fetchone()
-        if row is None:
-            return None
-        payload = json.loads(row["response_json"])
-        return str(payload["request_content"]), AssistantTurnResponse.model_validate(
-            payload["response"]
+        return self._delete(
+            "DELETE FROM app.planningsession WHERE sessionid = %s AND visitorid = %s",
+            (session_id, visitor_id),
         )
 
-    def list_memories(self) -> builtins.list[TravelMemory]:
-        """按键读取长期偏好；这里只保存用户明确要求记住的稳定字段。"""
+    def list_recoverable_sessions(
+        self,
+    ) -> builtins.list[tuple[UUID, PlanningSession]]:
+        """启动恢复必须携带所有者，恢复任务才能继续保持隔离。"""
 
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM travel_memories ORDER BY memory_key"
-            ).fetchall()
+        rows = self._fetch_all(
+            """
+            SELECT visitorid, sessionjson FROM app.planningsession
+            WHERE status IN ('searching', 'generating') ORDER BY createdat
+            """,
+            (),
+        )
         return [
-            TravelMemory(
-                key=row["memory_key"],
-                value=json.loads(row["value_json"]),
-                version=row["version"],
-                source_session_id=UUID(row["source_session_id"]),
-                created_at=datetime.fromisoformat(row["created_at"]),
-                updated_at=datetime.fromisoformat(row["updated_at"]),
-            )
+            (UUID(str(row["visitorid"])), PlanningSession.model_validate(row["sessionjson"]))
             for row in rows
         ]
 
-    def delete_memory(self, key: MemorySlotName) -> bool:
-        """删除一项长期偏好；现有会话快照不会被静默改写。"""
+    def create_dialogue(self, state: TravelDialogueState, visitor_id: UUID) -> None:
+        """创建访客专属助手状态。"""
 
-        with self._connect() as connection:
-            cursor = connection.execute("DELETE FROM travel_memories WHERE memory_key = ?", (key,))
-        return cursor.rowcount == 1
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO app.dialoguesession
+                    (sessionid, visitorid, revision, status, activeflow, statejson,
+                     planningsessionid, createdat, updatedat)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    state.session_id,
+                    visitor_id,
+                    state.revision,
+                    state.status,
+                    state.active_flow,
+                    Jsonb(state.model_dump(mode="json")),
+                    state.planning_session_id,
+                    state.created_at,
+                    state.updated_at,
+                ),
+            )
+
+    def get_dialogue(self, session_id: UUID, visitor_id: UUID) -> TravelDialogueState | None:
+        """读取访客专属助手状态。"""
+
+        row = self._fetch_one(
+            """
+            SELECT statejson FROM app.dialoguesession
+            WHERE sessionid = %s AND visitorid = %s
+            """,
+            (session_id, visitor_id),
+        )
+        return TravelDialogueState.model_validate(row["statejson"]) if row else None
+
+    def get_dialogue_response(
+        self, session_id: UUID, message_id: UUID, visitor_id: UUID
+    ) -> tuple[str, AssistantTurnResponse] | None:
+        """读取当前访客的幂等消息结果。"""
+
+        row = self._fetch_one(
+            """
+            SELECT requestcontent, responsejson FROM app.dialoguerequest
+            WHERE sessionid = %s AND messageid = %s AND visitorid = %s
+            """,
+            (session_id, message_id, visitor_id),
+        )
+        if row is None:
+            return None
+        return str(row["requestcontent"]), AssistantTurnResponse.model_validate(
+            row["responsejson"]
+        )
+
+    def list_memories(self, visitor_id: UUID) -> builtins.list[TravelMemory]:
+        """列出当前访客明确保存的长期偏好。"""
+
+        rows = self._fetch_all(
+            "SELECT * FROM app.travelmemory WHERE visitorid = %s ORDER BY memorykey",
+            (visitor_id,),
+        )
+        return [_travel_memory(row) for row in rows]
+
+    def delete_memory(self, key: MemorySlotName, visitor_id: UUID) -> bool:
+        """删除当前访客的一项长期偏好。"""
+
+        return self._delete(
+            "DELETE FROM app.travelmemory WHERE visitorid = %s AND memorykey = %s",
+            (visitor_id, key),
+        )
 
     def save_dialogue_response(
         self,
@@ -574,103 +451,305 @@ class SqliteTripRepository:
         message_id: UUID,
         request_content: str,
         response: AssistantTurnResponse,
+        visitor_id: UUID,
         memory_upserts: dict[MemorySlotName, str | builtins.list[str]] | None = None,
         memory_deletes: set[MemorySlotName] | None = None,
     ) -> None:
-        """用乐观版本检查原子保存状态、响应和显式记忆变更。"""
+        """在一个事务中提交状态、幂等响应和长期偏好。"""
 
-        payload = json.dumps(
-            {
-                "request_content": request_content,
-                "response": response.model_dump(mode="json"),
-            },
-            ensure_ascii=False,
-        )
-        with self._connect() as connection:
+        with self._connection() as connection:
             cursor = connection.execute(
                 """
-                UPDATE travel_dialogue_sessions
-                SET revision = ?, status = ?, active_flow = ?, state_json = ?,
-                    planning_session_id = ?, updated_at = ?
-                WHERE session_id = ? AND revision = ?
+                UPDATE app.dialoguesession SET
+                    revision = %s, status = %s, activeflow = %s, statejson = %s,
+                    planningsessionid = %s, updatedat = %s
+                WHERE sessionid = %s AND visitorid = %s AND revision = %s
                 """,
                 (
                     state.revision,
                     state.status,
                     state.active_flow,
-                    state.model_dump_json(),
-                    str(state.planning_session_id) if state.planning_session_id else None,
-                    state.updated_at.isoformat(),
-                    str(state.session_id),
+                    Jsonb(state.model_dump(mode="json")),
+                    state.planning_session_id,
+                    state.updated_at,
+                    state.session_id,
+                    visitor_id,
                     state.revision - 1,
                 ),
             )
             if cursor.rowcount != 1:
-                raise sqlite3.IntegrityError("dialogue revision conflict")
-            connection.execute(
+                raise RepositoryConflictError("dialogue revision conflict")
+            inserted = connection.execute(
                 """
-                INSERT INTO travel_dialogue_requests
-                (session_id, message_id, response_json, created_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO app.dialoguerequest
+                    (sessionid, visitorid, messageid, requestcontent, responsejson, createdat)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (sessionid, messageid) DO NOTHING RETURNING messageid
                 """,
                 (
-                    str(state.session_id),
-                    str(message_id),
-                    payload,
-                    state.updated_at.isoformat(),
+                    state.session_id,
+                    visitor_id,
+                    message_id,
+                    request_content,
+                    Jsonb(response.model_dump(mode="json")),
+                    state.updated_at,
                 ),
-            )
+            ).fetchone()
+            if inserted is None:
+                raise RepositoryConflictError("dialogue message conflict")
             self._apply_memory_changes(
                 connection,
                 state,
+                visitor_id,
                 memory_upserts or {},
                 memory_deletes or set(),
             )
 
+    def get_cache(self, provider: str, key: str) -> Any | None:
+        """读取共享 Provider 缓存；PR 3 会把它迁移到 Redis。"""
+
+        now = _now()
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT payloadjson, expiresat FROM app.providercache
+                WHERE provider = %s AND cachekey = %s
+                """,
+                (provider, key),
+            ).fetchone()
+            if row and row["expiresat"] <= now:
+                connection.execute(
+                    "DELETE FROM app.providercache WHERE provider = %s AND cachekey = %s",
+                    (provider, key),
+                )
+                return None
+        return row["payloadjson"] if row else None
+
+    def set_cache(self, provider: str, key: str, value: Any, ttl_seconds: int) -> None:
+        """保存共享 Provider 缓存。"""
+
+        now = _now()
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO app.providercache
+                    (provider, cachekey, payloadjson, expiresat, updatedat)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (provider, cachekey) DO UPDATE SET
+                    payloadjson = excluded.payloadjson,
+                    expiresat = excluded.expiresat,
+                    updatedat = excluded.updatedat
+                """,
+                (provider, key, Jsonb(value), now + timedelta(seconds=ttl_seconds), now),
+            )
+
+    def claim_legacy(self, visitor_id: UUID, token_hash: str) -> None:
+        """原子认领旧数据；当前访客偏好优先，旧偏好只补缺失项。"""
+
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM app.legacyclaim WHERE tokenhash = %s FOR UPDATE
+                """,
+                (token_hash,),
+            ).fetchone()
+            _validate_claim(row)
+            assert row is not None
+            legacy_id = UUID(str(row["visitorid"]))
+            self._move_legacy_resources(connection, legacy_id, visitor_id)
+            connection.execute(
+                """
+                UPDATE app.legacyclaim SET status = 'claimed', claimedby = %s, claimedat = %s
+                WHERE claimid = %s AND status = 'pending'
+                """,
+                (visitor_id, _now(), row["claimid"]),
+            )
+
     @staticmethod
     def _apply_memory_changes(
-        connection: sqlite3.Connection,
+        connection: Connection[Any],
         state: TravelDialogueState,
+        visitor_id: UUID,
         upserts: dict[MemorySlotName, str | builtins.list[str]],
         deletes: set[MemorySlotName],
     ) -> None:
-        """在消息事务内更新记忆，避免回复成功而偏好写入失败。"""
-
         for key in deletes:
-            connection.execute("DELETE FROM travel_memories WHERE memory_key = ?", (key,))
+            connection.execute(
+                "DELETE FROM app.travelmemory WHERE visitorid = %s AND memorykey = %s",
+                (visitor_id, key),
+            )
         for key, value in upserts.items():
             connection.execute(
                 """
-                INSERT INTO travel_memories
-                    (memory_key, value_json, version, source_session_id,
-                     created_at, updated_at)
-                VALUES (?, ?, 1, ?, ?, ?)
-                ON CONFLICT(memory_key) DO UPDATE SET
-                    value_json = excluded.value_json,
-                    version = travel_memories.version + 1,
-                    source_session_id = excluded.source_session_id,
-                    updated_at = excluded.updated_at
+                INSERT INTO app.travelmemory
+                    (visitorid, memorykey, valuejson, version, sourcesessionid,
+                     createdat, updatedat)
+                VALUES (%s, %s, %s, 1, %s, %s, %s)
+                ON CONFLICT (visitorid, memorykey) DO UPDATE SET
+                    valuejson = excluded.valuejson,
+                    version = app.travelmemory.version + 1,
+                    sourcesessionid = excluded.sourcesessionid,
+                    updatedat = excluded.updatedat
                 """,
                 (
+                    visitor_id,
                     key,
-                    json.dumps(value, ensure_ascii=False),
-                    str(state.session_id),
-                    state.updated_at.isoformat(),
-                    state.updated_at.isoformat(),
+                    Jsonb(value),
+                    state.session_id,
+                    state.updated_at,
+                    state.updated_at,
                 ),
             )
 
+    @staticmethod
+    def _move_legacy_resources(
+        connection: Connection[Any], legacy_id: UUID, visitor_id: UUID
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE app.planningsession AS old SET idempotencykey = NULL
+            WHERE old.visitorid = %s AND old.idempotencykey IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM app.planningsession AS current
+                  WHERE current.visitorid = %s
+                    AND current.idempotencykey = old.idempotencykey
+              )
+            """,
+            (legacy_id, visitor_id),
+        )
+        for table in ("trip", "planningsession", "dialoguesession", "dialoguerequest"):
+            connection.execute(
+                f"UPDATE app.{table} SET visitorid = %s WHERE visitorid = %s",
+                (visitor_id, legacy_id),
+            )
+        connection.execute(
+            """
+            INSERT INTO app.travelmemory
+                (visitorid, memorykey, valuejson, version, sourcesessionid, createdat, updatedat)
+            SELECT %s, memorykey, valuejson, version, sourcesessionid, createdat, updatedat
+            FROM app.travelmemory WHERE visitorid = %s
+            ON CONFLICT (visitorid, memorykey) DO NOTHING
+            """,
+            (visitor_id, legacy_id),
+        )
+        connection.execute("DELETE FROM app.travelmemory WHERE visitorid = %s", (legacy_id,))
 
-def _trip_values(itinerary: Itinerary, request: TravelRequest) -> tuple[str, ...]:
-    """统一生成行程表的持久化字段，避免普通保存与原子更新字段漂移。"""
+    @contextmanager
+    def _connection(self) -> Iterator[Connection[Any]]:
+        if self._pool is None:
+            raise DatabaseUnavailableError("PostgreSQL 业务数据库尚未配置")
+        try:
+            with self._pool.connection(timeout=self.timeout_seconds) as connection:
+                yield connection
+        except RepositoryConflictError:
+            raise
+        except (PsycopgError, PoolTimeout, OSError) as error:
+            raise DatabaseUnavailableError() from error
 
-    return (
-        str(itinerary.trip_id),
-        itinerary.destination,
-        itinerary.start_date.isoformat(),
-        itinerary.end_date.isoformat(),
-        itinerary.summary,
-        itinerary.created_at.isoformat(),
-        request.model_dump_json(),
-        itinerary.model_dump_json(),
+    def _fetch_one(self, query: str, parameters: tuple[Any, ...]) -> Any | None:
+        with self._connection() as connection:
+            return connection.execute(query, parameters).fetchone()
+
+    def _fetch_all(
+        self, query: str, parameters: tuple[Any, ...]
+    ) -> builtins.list[Any]:
+        with self._connection() as connection:
+            return builtins.list(connection.execute(query, parameters).fetchall())
+
+    def _delete(self, query: str, parameters: tuple[Any, ...]) -> bool:
+        with self._connection() as connection:
+            cursor = connection.execute(query, parameters)
+        return cursor.rowcount == 1
+
+
+def _create_pool(
+    database_url: str, min_size: int, max_size: int, timeout_seconds: float
+) -> ConnectionPool[Any] | None:
+    if not database_url:
+        return None
+    pool_min = max(1, min_size)
+    pool: ConnectionPool[Any] = ConnectionPool(
+        database_url,
+        min_size=pool_min,
+        max_size=max(pool_min, max_size),
+        timeout=timeout_seconds,
+        kwargs={"row_factory": dict_row},
+        configure=_configure_connection,
+        open=False,
     )
+    pool.open(wait=False)
+    return pool
+
+
+def _configure_connection(connection: Connection[Any]) -> None:
+    connection.execute("SET search_path TO app, public")
+    connection.commit()
+
+
+def create_conversation_pool(
+    database_url: str, min_size: int = 1, max_size: int = 4, timeout_seconds: float = 5
+) -> ConnectionPool[Any]:
+    """为 OpenZLAgent 会话建立独立有界同步连接池。"""
+
+    pool = _create_pool(database_url, min_size, max_size, timeout_seconds)
+    if pool is None:
+        raise DatabaseUnavailableError("PostgreSQL 对话数据库尚未配置")
+    return pool
+
+
+def _trip_values(
+    itinerary: Itinerary, request: TravelRequest, visitor_id: UUID
+) -> tuple[Any, ...]:
+    return (
+        itinerary.trip_id,
+        visitor_id,
+        itinerary.destination,
+        itinerary.start_date,
+        itinerary.end_date,
+        itinerary.summary,
+        itinerary.created_at,
+        Jsonb(request.model_dump(mode="json")),
+        Jsonb(itinerary.model_dump(mode="json")),
+        itinerary.revision,
+    )
+
+
+def _trip_summary(row: Any) -> TripSummary:
+    return TripSummary(
+        trip_id=UUID(str(row["tripid"])),
+        destination=str(row["destination"]),
+        start_date=row["startdate"],
+        end_date=row["enddate"],
+        summary=str(row["summary"]),
+        created_at=row["createdat"],
+    )
+
+
+def _travel_memory(row: Any) -> TravelMemory:
+    return TravelMemory(
+        key=row["memorykey"],
+        value=row["valuejson"],
+        version=int(row["version"]),
+        source_session_id=UUID(str(row["sourcesessionid"])),
+        created_at=row["createdat"],
+        updated_at=row["updatedat"],
+    )
+
+
+def _validate_claim(row: Any | None) -> None:
+    if row is None:
+        raise RepositoryConflictError("visitor_claim_invalid")
+    if row["status"] == "claimed":
+        raise RepositoryConflictError("visitor_claim_used")
+    if row["expiresat"] <= _now():
+        raise RepositoryConflictError("visitor_claim_expired")
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def read_sql_file(path: str | Path) -> str:
+    """读取 UTF-8 迁移 SQL，供一次性工具复用。"""
+
+    return Path(path).read_text(encoding="utf-8")

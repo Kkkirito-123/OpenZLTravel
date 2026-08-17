@@ -7,7 +7,7 @@ from app.config import Settings
 from app.errors import ProviderError
 from app.models import City, Poi
 from app.providers import AmapClient, _gcj02_to_wgs84
-from app.storage import SqliteTripRepository
+from tests.sqlite_repository import SqliteTripRepository
 
 
 def test_amap_response_is_converted_to_domain_models() -> None:

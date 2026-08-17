@@ -618,6 +618,14 @@ class AssistantMessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=1000)
 
 
+class VisitorClaimRequest(BaseModel):
+    """提交一次性旧数据认领码。"""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    token: str = Field(min_length=16, max_length=256)
+
+
 class AssistantTurnResponse(BaseModel):
     """处理一条消息后的回复和最新权威状态。"""
 

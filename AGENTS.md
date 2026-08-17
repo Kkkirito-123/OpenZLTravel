@@ -33,14 +33,15 @@ main.py
 - `workflow.py`：图结构和节点依赖，不保存最终行程。
 - `travel.py`：事实组装、候选校验、编辑重算和行程读写；`travel_budget.py` 只处理
   经验预算与真实报价合并，`travel_export.py` 只处理 Markdown 导出。
-- `providers/base.py`：MCP 生命周期、SQLite 缓存执行器、请求合并、重试和熔断。
+- `providers/base.py`：MCP 生命周期、共享缓存执行器、请求合并、重试和熔断。
 - `providers/maps.py`：本地优先、异步调度和交通降级；高德 HTTP 在 `amap.py`，天气在
   `weather.py`，坐标与本地估算在 `geo.py`。
 - `providers/rail.py`、`hotels.py`：供应商参数与稳定模型解析；酒店优先复用
   RollingGo Skill OAuth 令牌，旧 DIDA Token 仅作兼容。
 - `providers/planner.py`：确定性规划和只允许改文案的 LLM 增强。
-- `catalog.py`：PostgreSQL 公共地点查询，以及切换期显式启用的旧 SQLite 回滚实现。
-- `storage.py`：当前阶段的 SQLite 行程、会话和 Provider 缓存；不再负责地点目录。
+- `catalog.py`：PostgreSQL 公共地点查询，不再提供生产 SQLite 回滚实现。
+- `storage.py`：PostgreSQL 行程、规划、助手状态和 Provider 缓存；不再负责地点目录。
+- `identity.py`：匿名 Cookie、Token 哈希、资源认领和所有权边界。
 - `models.py`：稳定公共类型，不依赖业务实现。
 
 依赖方向：
@@ -72,7 +73,7 @@ models → 无业务依赖
 - 普通步行/驾车使用本地估算；公交、地铁和实时驾车经过统一高德调度与缓存。
 - 未知票价、房价和天气保持未知，不得用模型或经验值填充。
 - 第三方图片只保存合法 HTTP(S) URL，不下载、代理、缓存或放入模型提示。
-- RollingGo OAuth 令牌只从用户目录读取，不写入 SQLite、日志、API 响应或仓库。
+- RollingGo OAuth 令牌只从用户目录读取，不写入 PostgreSQL、日志、API 响应或仓库。
 - 酒店搜索和详情为只读能力；锁价、下单与支付必须经过独立接口和用户明确确认。
 - 预算属于估算值；选定车票和酒店使用真实报价，缺失报价不计入总额并添加警告。
 - 只有最终结构校验完成后才能保存行程，失败不得留下半成品。
@@ -80,10 +81,10 @@ models → 无业务依赖
 ## 稳定性约定
 
 - MCP 客户端遵循 Streamable HTTP 初始化、通知、协议版本和会话 ID 生命周期。
-- 同请求先查 SQLite 缓存，再做进程内任务合并；缓存键不得包含 Key 或 Token。
-- 不把 SQLite 结果缓存称为 KV Cache；真实 KV Cache 由模型供应商持有，只能通过稳定提示
+- 同请求先查 PostgreSQL 共享缓存，再做进程内任务合并；缓存键不得包含 Key 或 Token。
+- 不把 Provider 结果缓存称为 KV Cache；真实 KV Cache 由模型供应商持有，只能通过稳定提示
   前缀、可选 `prompt_cache_key` 和 cached token 指标使用与验证。
-- 地点查询已经使用多人共享 PostgreSQL；业务状态在后续独立 PR 迁移，当前仍保持单 Worker。
+- 地点查询和业务状态均使用多人共享 PostgreSQL；当前仍保持单 Worker，Redis 多 Worker 属于后续 PR。
 - PostgreSQL 地点未命中允许高德兜底；数据库连接故障必须返回 `catalog_unavailable`，
   禁止把基础设施故障放大成批量高德请求。
 - 每个 Provider 独立超时、限并发、最多一次网络重试和熔断。
@@ -92,8 +93,10 @@ models → 无业务依赖
   cancelled`；每个步骤独立记录耗时、尝试次数和降级信息。
 - `Idempotency-Key` 防止重复创建；重复生成和重启恢复不能重复保存完整行程。
 - 助手使用 `message_id` 幂等；相同 ID 的不同正文必须返回冲突，失败不得推进状态版本。
-- 同一助手会话的消息在进程内串行合并，状态与幂等响应在同一 SQLite 事务保存。
-- 业务 SQLite 暂时保持单 Worker 边界，使用 WAL 和 busy timeout；迁移由独立 PR 完成。
+- 同一助手会话的消息在进程内串行合并，状态、幂等响应和长期偏好在同一 PostgreSQL 事务保存。
+- 浏览器 Cookie 只保存随机 Token，数据库只保存 Token 哈希；资源查询必须同时匹配 visitorid 和资源 ID。
+- SQLite 只允许出现在一次性迁移工具和迁移测试中；生产 `app/` 不得导入 `sqlite3`。
+- PostgreSQL 唯一约束是跨进程幂等最终保障；Redis 锁和租约必须等后续 PR 实现后才可使用。
 - 日志允许记录请求 ID、会话 ID、步骤、耗时、缓存命中和稳定错误码，禁止记录密钥、
   完整上游响应或个人信息。
 
@@ -123,7 +126,7 @@ models → 无业务依赖
 
 ```powershell
 cd backend
-python -m ruff check app tests
+python -m ruff check app tests scripts
 python -m mypy app
 python -m pytest -q
 

@@ -105,6 +105,7 @@ function Write-RuntimeEnvironment {
         "@127.0.0.1:55432/openzltravelcatalog"
     $catalogLines = @(
         "# 此文件由 catalog.ps1 生成，只包含本机应用运行配置，不要提交。",
+        "DATABASE_URL=$catalogUrl",
         "CATALOG_DATABASE_URL=$catalogUrl"
     )
     [System.IO.File]::WriteAllLines(
@@ -186,6 +187,16 @@ function Install-CatalogDependencies {
     }
 }
 
+function Initialize-AppSchema {
+    $catalogSchema = Join-Path $catalogBackend "database\app.sql"
+    Get-Content -LiteralPath $catalogSchema -Raw -Encoding UTF8 |
+        & docker exec -i openzltravelcatalog `
+        psql -v ON_ERROR_STOP=1 -U catalogowner -d openzltravelcatalog
+    if ($LASTEXITCODE -ne 0) {
+        throw "业务 app Schema 初始化失败。"
+    }
+}
+
 function Invoke-CatalogModule {
     param([Parameter(Mandatory)][string[]]$Arguments)
 
@@ -217,6 +228,7 @@ if ($Build) {
 if ($Runtime) {
     Install-CatalogDependencies
     Invoke-CatalogModule -Arguments @("-m", "catalog_builder.runtime_access")
+    Initialize-AppSchema
     Write-RuntimeEnvironment
     Write-Host "已写入本地运行配置：backend/.env.runtime.local"
     return

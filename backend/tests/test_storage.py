@@ -4,8 +4,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from app import storage
-from app.storage import SqliteTripRepository
+from tests import sqlite_repository
+from tests.sqlite_repository import SqliteTripRepository
 
 
 class TrackingConnection(sqlite3.Connection):
@@ -31,7 +31,7 @@ def _track_connections(monkeypatch: Any) -> list[TrackingConnection]:
         connections.append(connection)
         return connection
 
-    monkeypatch.setattr(storage.sqlite3, "connect", connect)
+    monkeypatch.setattr(sqlite_repository.sqlite3, "connect", connect)
     return connections
 
 
