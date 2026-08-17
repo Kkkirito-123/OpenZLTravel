@@ -55,6 +55,7 @@ async def test_application_container_closes_runtime_and_all_http_clients(tmp_pat
         Settings(
             database_path=str(tmp_path / "container.sqlite3"),
             catalog_path=str(tmp_path / "missing-catalog.sqlite3"),
+            catalog_sqlite_rollback=True,
             rollinggo_hotel_token_path=str(tmp_path / "missing-token.json"),
             llm_api_key="",
             llm_model="",

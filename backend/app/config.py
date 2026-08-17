@@ -11,6 +11,8 @@ from dotenv import load_dotenv
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(BACKEND_ROOT / ".env")
+# 本地运行账号由 catalog.ps1 生成到独立文件，避免改写用户已有的模型和地图密钥配置。
+load_dotenv(BACKEND_ROOT / ".env.runtime.local", override=False)
 
 
 @dataclass(frozen=True)
@@ -71,5 +73,11 @@ class Settings:
         "DATABASE_PATH", str(BACKEND_ROOT / "db" / "openzltravel.sqlite3")
     )
     amap_js_key: str = os.getenv("VITE_AMAP_JS_KEY", "")
+    catalog_database_url: str = os.getenv("CATALOG_DATABASE_URL", "")
+    catalog_pool_min_size: int = int(os.getenv("CATALOG_POOL_MIN_SIZE", "1"))
+    catalog_pool_max_size: int = int(os.getenv("CATALOG_POOL_MAX_SIZE", "4"))
+    catalog_pool_timeout_seconds: float = float(os.getenv("CATALOG_POOL_TIMEOUT_SECONDS", "3"))
+    # 仅用于 PostgreSQL 切换初期的显式回滚，默认运行路径不会再读取 SQLite 地点目录。
+    catalog_sqlite_rollback: bool = os.getenv("CATALOG_SQLITE_ROLLBACK", "false").lower() == "true"
     catalog_path: str = os.getenv("CATALOG_PATH", str(BACKEND_ROOT / "data" / "catalog.sqlite3"))
     allow_amap_fallback: bool = os.getenv("ALLOW_AMAP_FALLBACK", "true").lower() == "true"

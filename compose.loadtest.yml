@@ -50,6 +50,7 @@ services:
     environment:
       DATABASE_PATH: /data/openzltravel.sqlite3
       CATALOG_PATH: /data/catalog-not-present.sqlite3
+      CATALOG_SQLITE_ROLLBACK: "true"
       ALLOW_AMAP_FALLBACK: "true"
       AMAP_API_KEY: fake-loadtest-key
       AMAP_BASE_URL: http://fake-upstream:9000/amap/v3

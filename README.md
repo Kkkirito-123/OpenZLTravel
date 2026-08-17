@@ -72,7 +72,8 @@ backend/app/
   travel.py             行程组装、候选校验、编辑重算和行程读写
   travel_budget.py      经验预算、真实车票/酒店报价合并与超额提示
   travel_export.py      已校验行程的 Markdown 导出
-  storage.py            行程、会话、Provider 缓存和本地目录的 SQLite 实现
+  catalog.py            PostgreSQL 地点、行政区和附近 POI 查询
+  storage.py            当前阶段的行程、会话和 Provider 缓存 SQLite 实现
   providers/
     base.py             MCP 生命周期、缓存执行器、去重、并发、重试和熔断
     maps.py             本地优先、调度和交通降级策略，兼容既有导入
@@ -284,24 +285,25 @@ Redis。模型端 KV Cache 不由应用持有；仅在供应商明确支持时�
 并通过返回的 cached token 指标验证是否真正命中。
 
 降级规则：12306 失败可自行安排，RollingGo 失败回退 OSM，天气失败标记未知，高德路线失败
-使用本地估算。只有本地 POI 不可用或 SQLite 失败才终止主流程。
+使用本地估算。地点未命中允许高德兜底；PostgreSQL 连接故障直接返回
+`catalog_unavailable`，避免故障期间集中消耗高德配额。
 
 ## 本地公开数据
 
-运行时优先读取 `backend/data/catalog.sqlite3`。原始 OpenStreetMap 中国 PBF 和 GeoNames
-城市数据位于 `backend/data/raw/`，体积较大且均被 Git 忽略。重新下载和构建：
+运行时默认读取 `openzltravelcatalog.catalog`，使用 PostGIS 查询城市 80 公里内景点、餐厅
+和酒店。应用使用只读 `travelapp` 账号，数据库所有者只用于构建。首次配置运行账号：
 
 ```powershell
-cd backend
-./scripts/download_public_data.ps1
-python -m pip install -r requirements-data.txt
-python scripts/build_catalog.py
+.\catalog.ps1 -Start
+.\catalog.ps1 -Runtime
 ```
 
-来源与许可证见 [backend/scripts/README.md](backend/scripts/README.md)。
+`-Runtime` 会生成被 Git 忽略的 `backend/.env.runtime.local`，不会改写已有 `.env`。正常
+运行不再读取 `backend/data/catalog.sqlite3`；只有显式设置
+`CATALOG_SQLITE_ROLLBACK=true` 才启用旧目录。
 
-多人共享的 PostgreSQL/PostGIS 树形地点库是独立构建目标，当前 FastAPI 尚未切换到该库；
-表、字段、许可、构建和查询方式见 [DATABASE.md](DATABASE.md)。
+原始 OpenStreetMap、GeoNames、AreaCity 和 Modood 数据、表结构、许可证及全量构建方式见
+[DATABASE.md](DATABASE.md)。
 
 ## 验证
 

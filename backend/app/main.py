@@ -30,6 +30,7 @@ from re_zlagent.harness.model import (  # type: ignore[import-untyped]
 )
 
 from app.assistant import TravelAssistantService
+from app.catalog import PostgresCatalogRepository, SqliteCatalogRepository
 from app.config import Settings
 from app.dialogue import PromptCacheTransport, TravelCommandGenerator
 from app.errors import AppError
@@ -68,7 +69,7 @@ from app.providers import (
 )
 from app.runtime import PlanningRuntime
 from app.skills import list_skill_views
-from app.storage import CatalogRepository, SqliteTripRepository
+from app.storage import SqliteTripRepository
 from app.travel import TravelService, itinerary_to_markdown
 from app.workflow import WorkbenchWorkflow
 
@@ -81,7 +82,7 @@ class ApplicationContainer:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or Settings()
         self.repository = SqliteTripRepository(self.settings.database_path)
-        self.catalog = CatalogRepository(self.settings.catalog_path)
+        self.catalog = self._catalog_repository()
         self.amap_client = AmapClient(self.settings, self.repository)
         self.weather_client = OpenMeteoClient(self.settings, self.repository)
         scheduler = AmapScheduler(
@@ -192,6 +193,18 @@ class ApplicationContainer:
             self.settings.provider_cooldown_seconds,
         )
 
+    def _catalog_repository(self) -> PostgresCatalogRepository | SqliteCatalogRepository:
+        """默认使用 PostgreSQL；旧 SQLite 只能通过显式开关回滚。"""
+
+        if self.settings.catalog_sqlite_rollback:
+            return SqliteCatalogRepository(self.settings.catalog_path)
+        return PostgresCatalogRepository(
+            self.settings.catalog_database_url,
+            min_size=self.settings.catalog_pool_min_size,
+            max_size=self.settings.catalog_pool_max_size,
+            timeout_seconds=self.settings.catalog_pool_timeout_seconds,
+        )
+
     def _intent_model(self) -> OpenAICompatibleModelClient | None:
         """仅在模型配置完整时构造意图客户端。"""
 
@@ -214,10 +227,12 @@ class ApplicationContainer:
     def readiness(self) -> dict[str, object]:
         """返回不触发外部请求的本地就绪状态。"""
 
+        catalog = self.catalog.readiness()
         return {
-            "status": "ready",
+            "status": "ready" if catalog["status"] == "ready" else "not_ready",
             "database": "ok",
-            "catalog": "ready" if self.catalog.available else "missing",
+            "catalog": catalog["status"],
+            "catalog_pool": catalog["pool"],
             "rail_mcp": "configured" if self.settings.rail_mcp_url else "missing",
             "hotel_provider": self._hotel_readiness(),
             "intent_model": (
@@ -251,6 +266,7 @@ class ApplicationContainer:
             except Exception:
                 LOGGER.exception("map_client_close_failed")
         self.conversation_store.close()
+        self.catalog.close()
 
 
 @lru_cache
