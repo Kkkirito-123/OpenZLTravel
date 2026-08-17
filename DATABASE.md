@@ -265,16 +265,15 @@ catalogbuild    → catalog
 
 - `catalogowner`：数据库所有者和离线构建账号，不给普通应用使用。
 - `catalogreader`：无登录能力的只读权限组，拥有 `catalog` 的 `USAGE` 和表 `SELECT`。
+- `travelapp`：FastAPI 使用的登录账号，只继承 `catalogreader`，不能修改地点事实。
 
-为具体应用或用户创建独立登录账号后，将只读权限组授予该账号：
+本地使用以下命令幂等创建 `travelapp`，随机密码只写入被 Git 忽略的配置文件：
 
-```sql
-CREATE ROLE travelapp LOGIN PASSWORD '请替换为独立强密码';
-GRANT catalogreader TO travelapp;
+```powershell
+.\catalog.ps1 -Runtime
 ```
 
-这样每个使用方拥有独立凭据，但权限都由 `catalogreader` 集中管理。后续账号、RLS 和审计策略
-可以独立增加，不需要改动地点表。
+应用不会使用 `catalogowner`。后续账号、RLS 和审计策略可以独立增加，不需要改动地点表。
 
 ## 常用中文查询
 

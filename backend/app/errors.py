@@ -21,6 +21,13 @@ class ProviderError(AppError):
         super().__init__(code, message, status_code=503)
 
 
+class CatalogUnavailableError(AppError):
+    """公共地点数据库不可用，禁止自动放大为外部地图流量。"""
+
+    def __init__(self, message: str = "公共地点数据库暂时不可用") -> None:
+        super().__init__("catalog_unavailable", message, status_code=503)
+
+
 class DraftError(AppError):
     """模型草稿无法解析或违反候选数据约束。"""
 

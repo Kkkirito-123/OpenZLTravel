@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from app.config import Settings
-from app.errors import ProviderError
+from app.errors import CatalogUnavailableError, ProviderError
 from app.models import City, Poi
 from app.providers import AmapScheduler, HybridMapProvider, OpenMeteoClient
 from app.storage import SqliteTripRepository
@@ -225,6 +225,27 @@ async def test_local_catalog_skips_amap_scheduler_for_city_and_candidates() -> N
 
     assert candidates.attractions
     assert scheduler.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_catalog_failure_does_not_fall_back_to_amap() -> None:
+    """数据库故障时必须停止，避免并发请求被放大为高德流量。"""
+
+    class FailedCatalog:
+        available = True
+
+        def resolve_city(self, destination: str) -> City:
+            del destination
+            raise CatalogUnavailableError()
+
+    class UnexpectedUpstream(FakeMapProvider):
+        def resolve_city(self, destination: str) -> City:
+            raise AssertionError(f"数据库故障时不应请求高德：{destination}")
+
+    provider = HybridMapProvider(FailedCatalog(), UnexpectedUpstream())
+
+    with pytest.raises(CatalogUnavailableError):
+        await provider.resolve_city_async("测试市")
 
 
 @pytest.mark.asyncio

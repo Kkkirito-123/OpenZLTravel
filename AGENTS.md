@@ -19,6 +19,7 @@ main.py
   → providers/base.py
   → providers/maps.py → amap.py / weather.py / geo.py
   → providers/rail.py / hotels.py / planner.py
+  → catalog.py
   → storage.py
   → models.py / errors.py / config.py
 ```
@@ -38,7 +39,8 @@ main.py
 - `providers/rail.py`、`hotels.py`：供应商参数与稳定模型解析；酒店优先复用
   RollingGo Skill OAuth 令牌，旧 DIDA Token 仅作兼容。
 - `providers/planner.py`：确定性规划和只允许改文案的 LLM 增强。
-- `storage.py`：SQLite 行程、会话、缓存和本地目录。
+- `catalog.py`：PostgreSQL 公共地点查询，以及切换期显式启用的旧 SQLite 回滚实现。
+- `storage.py`：当前阶段的 SQLite 行程、会话和 Provider 缓存；不再负责地点目录。
 - `models.py`：稳定公共类型，不依赖业务实现。
 
 依赖方向：
@@ -50,6 +52,7 @@ main → runtime → workflow → travel / providers
 runtime → storage / models
 travel → models / storage
 providers → config / models / errors / CacheStore
+catalog → PostgreSQL catalog / models / errors
 storage → models
 models → 无业务依赖
 ```
@@ -80,8 +83,9 @@ models → 无业务依赖
 - 同请求先查 SQLite 缓存，再做进程内任务合并；缓存键不得包含 Key 或 Token。
 - 不把 SQLite 结果缓存称为 KV Cache；真实 KV Cache 由模型供应商持有，只能通过稳定提示
   前缀、可选 `prompt_cache_key` 和 cached token 指标使用与验证。
-- 单用户单 Worker 不引入 Redis；只有多实例共享锁、队列、限流或 SQLite 写竞争成为真实
-  需求时才实现 CacheStore 的 Redis 适配器。
+- 地点查询已经使用多人共享 PostgreSQL；业务状态在后续独立 PR 迁移，当前仍保持单 Worker。
+- PostgreSQL 地点未命中允许高德兜底；数据库连接故障必须返回 `catalog_unavailable`，
+  禁止把基础设施故障放大成批量高德请求。
 - 每个 Provider 独立超时、限并发、最多一次网络重试和熔断。
 - 认证失败、限流、业务错误和结构错误不重试。
 - 会话状态只使用 `searching / awaiting_selection / generating / completed / failed /
@@ -89,7 +93,7 @@ models → 无业务依赖
 - `Idempotency-Key` 防止重复创建；重复生成和重启恢复不能重复保存完整行程。
 - 助手使用 `message_id` 幂等；相同 ID 的不同正文必须返回冲突，失败不得推进状态版本。
 - 同一助手会话的消息在进程内串行合并，状态与幂等响应在同一 SQLite 事务保存。
-- SQLite 保持单用户、单 Worker 边界，使用 WAL 和 busy timeout；不要引入新的数据库层。
+- 业务 SQLite 暂时保持单 Worker 边界，使用 WAL 和 busy timeout；迁移由独立 PR 完成。
 - 日志允许记录请求 ID、会话 ID、步骤、耗时、缓存命中和稳定错误码，禁止记录密钥、
   完整上游响应或个人信息。
 

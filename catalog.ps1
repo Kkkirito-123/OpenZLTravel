@@ -17,7 +17,10 @@ param(
     [int]$Depth = 2,
 
     [Parameter(Mandatory, ParameterSetName = "Stats")]
-    [switch]$Stats
+    [switch]$Stats,
+
+    [Parameter(Mandatory, ParameterSetName = "Runtime")]
+    [switch]$Runtime
 )
 
 Set-StrictMode -Version Latest
@@ -27,6 +30,7 @@ $catalogRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $catalogBackend = Join-Path $catalogRoot "backend"
 $catalogCompose = Join-Path $catalogRoot "compose.catalog.yml"
 $catalogEnvFile = Join-Path $catalogBackend ".env.catalog.local"
+$runtimeEnvFile = Join-Path $catalogBackend ".env.runtime.local"
 $catalogPython = Join-Path $catalogRoot "..\..\.venv\Scripts\python.exe"
 
 if (-not (Test-Path -LiteralPath $catalogPython)) {
@@ -57,8 +61,32 @@ function New-CatalogEnvironment {
     Write-Host "已创建独立地点库配置：backend/.env.catalog.local"
 }
 
+function Initialize-RuntimeCredential {
+    $catalogExisting = Get-Content -LiteralPath $catalogEnvFile -Encoding UTF8
+    if ($catalogExisting | Where-Object { $_ -match '^TRAVELAPP_POSTGRES_PASSWORD=' }) {
+        return
+    }
+
+    $catalogBytes = New-Object byte[] 32
+    $catalogRandom = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $catalogRandom.GetBytes($catalogBytes)
+    }
+    finally {
+        $catalogRandom.Dispose()
+    }
+    $catalogPassword = ($catalogBytes | ForEach-Object { $_.ToString("x2") }) -join ""
+    $catalogUpdated = @($catalogExisting) + "TRAVELAPP_POSTGRES_PASSWORD=$catalogPassword"
+    [System.IO.File]::WriteAllLines(
+        $catalogEnvFile,
+        $catalogUpdated,
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+}
+
 function Import-CatalogEnvironment {
     New-CatalogEnvironment
+    Initialize-RuntimeCredential
     foreach ($catalogLine in Get-Content -LiteralPath $catalogEnvFile -Encoding UTF8) {
         $catalogValue = $catalogLine.Trim()
         if (-not $catalogValue -or $catalogValue.StartsWith("#")) {
@@ -70,6 +98,20 @@ function Import-CatalogEnvironment {
         }
         Set-Item -Path "Env:$($catalogParts[0])" -Value $catalogParts[1]
     }
+}
+
+function Write-RuntimeEnvironment {
+    $catalogUrl = "postgresql://travelapp:$($env:TRAVELAPP_POSTGRES_PASSWORD)" +
+        "@127.0.0.1:55432/openzltravelcatalog"
+    $catalogLines = @(
+        "# 此文件由 catalog.ps1 生成，只包含本机应用运行配置，不要提交。",
+        "CATALOG_DATABASE_URL=$catalogUrl"
+    )
+    [System.IO.File]::WriteAllLines(
+        $runtimeEnvFile,
+        $catalogLines,
+        (New-Object System.Text.UTF8Encoding($false))
+    )
 }
 
 function Test-DockerReady {
@@ -169,6 +211,14 @@ Start-CatalogDatabase
 if ($Build) {
     Install-CatalogDependencies -IncludeOsmium
     Invoke-CatalogModule -Arguments @("-m", "catalog_builder.build")
+    return
+}
+
+if ($Runtime) {
+    Install-CatalogDependencies
+    Invoke-CatalogModule -Arguments @("-m", "catalog_builder.runtime_access")
+    Write-RuntimeEnvironment
+    Write-Host "已写入本地运行配置：backend/.env.runtime.local"
     return
 }
 
