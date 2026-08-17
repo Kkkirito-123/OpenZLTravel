@@ -41,8 +41,12 @@ backend/data/amap-cache.json.tmp
 # Frontend dependencies and build output
 node_modules/
 frontend/node_modules/
+frontend/.vite/
 dist/
 frontend/dist/
+
+# Local concurrency experiment outputs
+loadtests/results/
 
 # Logs
 *.log

@@ -319,6 +319,18 @@ npm.cmd run build
 自动测试全部使用 Fake Provider 和临时 SQLite，不读取 `.env`，也不访问真实高德、12306、
 RollingGo、DIDA、Open-Meteo 或模型服务。真实服务冒烟测试必须与离线门禁分开执行。
 
+## 并发实验室
+
+当前单 Worker + SQLite 的容量基线使用独立 Docker Compose、Fake Upstream 和 Locust 测量，
+不读取真实密钥，也不修改生产 API。先执行 10 用户冒烟：
+
+```powershell
+.\loadtest.ps1 -Action Smoke -Scenario normal
+```
+
+完整的 10 → 50 → 200 → 500 用户阶段、故障场景、指标解释和受限真实供应商探针见
+[CONCURRENCY.md](CONCURRENCY.md)。
+
 ## 当前边界
 
 V0.5 仍是本地单用户、国内单目的地、单 Uvicorn Worker。长期记忆只保存用户明确授权的
