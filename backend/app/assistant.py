@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Protocol
 from uuid import UUID, uuid4
@@ -47,7 +46,7 @@ from app.models import (
     TravelMemory,
 )
 from app.skills import get_skill
-from app.storage import DialogueRepository
+from app.storage import UNSCOPED_VISITOR_ID, DialogueRepository, RepositoryConflictError
 
 LOGGER = logging.getLogger("openzltravel.assistant")
 
@@ -63,7 +62,10 @@ class PlanningStarter(Protocol):
     """创建现有三阶段规划会话所需的最小运行时边界。"""
 
     def start(
-        self, request: PlanningRequest, idempotency_key: str | None = None
+        self,
+        request: PlanningRequest,
+        idempotency_key: str | None = None,
+        visitor_id: UUID = UNSCOPED_VISITOR_ID,
     ) -> PlanningSession:
         """立即创建规划会话，不等待外部查询结束。"""
 
@@ -102,9 +104,11 @@ class TravelAssistantService:
         self._planning_runtime = planning_runtime
         self._command_generator = command_generator
         self._context = TravelContextAssembler()
-        self._locks: dict[UUID, asyncio.Lock] = {}
+        self._locks: dict[tuple[UUID, UUID], asyncio.Lock] = {}
 
-    def create(self) -> AssistantSessionView:
+    def create(
+        self, visitor_id: UUID = UNSCOPED_VISITOR_ID
+    ) -> AssistantSessionView:
         """创建空会话；首条用户消息再决定进入哪一个旅行 Flow。"""
 
         now = _now()
@@ -113,19 +117,21 @@ class TravelAssistantService:
             created_at=now,
             updated_at=now,
         )
-        memories = tuple(self._repository.list_memories())
+        memories = tuple(self._repository.list_memories(visitor_id))
         state = apply_memory_defaults(state, memories)
-        self._repository.create_dialogue(state)
+        self._repository.create_dialogue(state, visitor_id)
         return AssistantSessionView(
             state=state,
             skill=None,
             memories=list(memories),
         )
 
-    async def get(self, session_id: UUID) -> AssistantSessionView:
+    async def get(
+        self, session_id: UUID, visitor_id: UUID = UNSCOPED_VISITOR_ID
+    ) -> AssistantSessionView:
         """读取权威状态和仍在短期窗口中的完整对话轮次。"""
 
-        state = self._require_state(session_id)
+        state = self._require_state(session_id, visitor_id)
         context = await self._conversations.prepare(str(session_id))
         turns = [
             AssistantConversationTurn(
@@ -141,37 +147,51 @@ class TravelAssistantService:
             state=state,
             turns=turns,
             skill=skill.view() if skill else None,
-            memories=self._repository.list_memories(),
+            memories=self._repository.list_memories(visitor_id),
         )
 
-    def list_memories(self) -> list[TravelMemory]:
+    def list_memories(
+        self, visitor_id: UUID = UNSCOPED_VISITOR_ID
+    ) -> list[TravelMemory]:
         """返回用户明确保存的长期旅行偏好。"""
 
-        return self._repository.list_memories()
+        return self._repository.list_memories(visitor_id)
 
-    def delete_memory(self, key: MemorySlotName) -> None:
+    def delete_memory(
+        self, key: MemorySlotName, visitor_id: UUID = UNSCOPED_VISITOR_ID
+    ) -> None:
         """通过设置页删除长期偏好，不静默改写已经存在的会话。"""
 
-        if not self._repository.delete_memory(key):
+        if not self._repository.delete_memory(key, visitor_id):
             raise AppError("assistant_memory_not_found", "这项长期偏好不存在", 404)
 
     async def send(
-        self, session_id: UUID, request: AssistantMessageRequest
+        self,
+        session_id: UUID,
+        request: AssistantMessageRequest,
+        visitor_id: UUID = UNSCOPED_VISITOR_ID,
     ) -> AssistantTurnResponse:
         """处理一条消息；同一 message_id 永远复用第一次成功响应。"""
 
-        async with self._lock(session_id):
-            state = self._require_state(session_id)
-            cached = self._repository.get_dialogue_response(session_id, request.message_id)
+        async with self._lock(session_id, visitor_id):
+            state = self._require_state(session_id, visitor_id)
+            cached = self._repository.get_dialogue_response(
+                session_id,
+                request.message_id,
+                visitor_id,
+            )
             if cached is not None:
                 return self._resolve_cached(cached, request.content)
-            return await self._process(state, request)
+            return await self._process(state, request, visitor_id)
 
     async def _process(
-        self, state: TravelDialogueState, request: AssistantMessageRequest
+        self,
+        state: TravelDialogueState,
+        request: AssistantMessageRequest,
+        visitor_id: UUID,
     ) -> AssistantTurnResponse:
         context = await self._conversations.prepare(str(state.session_id))
-        memories = tuple(self._repository.list_memories())
+        memories = tuple(self._repository.list_memories(visitor_id))
         batch = parse_fast_commands(request.content, state)
         generation: CommandGeneration | None = None
         if batch is None:
@@ -202,6 +222,7 @@ class TravelAssistantService:
             planning = self._planning_runtime.start(
                 decision.planning_request,
                 f"assistant:{state.session_id}:{final_state.revision}",
+                visitor_id,
             )
             planning_id = planning.session_id
             final_state = final_state.model_copy(
@@ -223,7 +244,7 @@ class TravelAssistantService:
             command_source=(generation.source if generation else "fast_parser"),
             context_tokens=(generation.manifest.estimated_tokens if generation else 0),
         )
-        cached_response = self._save_response(request, response, effects)
+        cached_response = self._save_response(request, response, effects, visitor_id)
         if cached_response is not None:
             return cached_response
         manifest = (
@@ -244,6 +265,7 @@ class TravelAssistantService:
         request: AssistantMessageRequest,
         response: AssistantTurnResponse,
         effects: CommandEffects,
+        visitor_id: UUID,
     ) -> AssistantTurnResponse | None:
         try:
             self._repository.save_dialogue_response(
@@ -251,13 +273,16 @@ class TravelAssistantService:
                 request.message_id,
                 request.content,
                 response,
+                visitor_id,
                 effects.memory_upserts,
                 set(effects.memory_deletes),
             )
             return None
-        except sqlite3.IntegrityError as error:
+        except RepositoryConflictError as error:
             cached = self._repository.get_dialogue_response(
-                response.state.session_id, request.message_id
+                response.state.session_id,
+                request.message_id,
+                visitor_id,
             )
             if cached is not None:
                 return self._resolve_cached(cached, request.content)
@@ -291,8 +316,10 @@ class TravelAssistantService:
                 type(error).__name__,
             )
 
-    def _require_state(self, session_id: UUID) -> TravelDialogueState:
-        state = self._repository.get_dialogue(session_id)
+    def _require_state(
+        self, session_id: UUID, visitor_id: UUID
+    ) -> TravelDialogueState:
+        state = self._repository.get_dialogue(session_id, visitor_id)
         if state is None:
             raise AppError("assistant_session_not_found", "旅行助手会话不存在", 404)
         return state
@@ -310,11 +337,12 @@ class TravelAssistantService:
             409,
         )
 
-    def _lock(self, session_id: UUID) -> asyncio.Lock:
-        lock = self._locks.get(session_id)
+    def _lock(self, session_id: UUID, visitor_id: UUID) -> asyncio.Lock:
+        key = (visitor_id, session_id)
+        lock = self._locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
-            self._locks[session_id] = lock
+            self._locks[key] = lock
         return lock
 
 

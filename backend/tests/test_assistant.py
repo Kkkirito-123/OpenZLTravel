@@ -18,7 +18,7 @@ from app.dialogue import TravelCommandGenerator
 from app.errors import AppError
 from app.main import app, get_assistant_service
 from app.models import AssistantMessageRequest, PlanningRequest, PlanningSession
-from app.storage import SqliteTripRepository
+from tests.sqlite_repository import SqliteTripRepository
 from tests.test_dialogue import FakeCityResolver, SequenceModel
 
 PLANNING_ID = UUID("22222222-2222-2222-2222-222222222222")
@@ -31,8 +31,12 @@ class FakePlanningRuntime:
         self.calls: list[tuple[PlanningRequest, str | None]] = []
 
     def start(
-        self, request: PlanningRequest, idempotency_key: str | None = None
+        self,
+        request: PlanningRequest,
+        idempotency_key: str | None = None,
+        visitor_id: UUID | None = None,
     ) -> PlanningSession:
+        del visitor_id
         self.calls.append((request, idempotency_key))
         now = datetime.now(timezone.utc)
         return PlanningSession(

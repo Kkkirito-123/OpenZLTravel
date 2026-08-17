@@ -1,6 +1,6 @@
 # OpenZLTravel V0.5
 
-OpenZLTravel 是一个本地单用户多轮旅行助手。用户先通过对话补全目的地、日期和预算，
+OpenZLTravel 是一个支持匿名访客隔离的多轮旅行助手。用户先通过对话补全目的地、日期和预算，
 需求完整后进入原有旅行工作台，并行查询车票、酒店、天气和本地 POI。项目以 editable
 方式复用 OpenZLAgent 的模型客户端、上下文清单、会话保存和滚动摘要，但不修改其核心代码。
 V0.5 增加显式长期偏好、静态 Skill 契约、会话 Token 账本和两级意图缓存。
@@ -24,7 +24,7 @@ Skill 注册表选择确定性 Flow
   ↓ 可选 LLM 文案润色，最多等待 8 秒
 校验完整结构
   ↓
-SQLite 保存完整行程
+PostgreSQL 保存共享业务状态和完整行程
   ↓
 逐日编辑、局部路线与预算重算、Markdown 导出
 ```
@@ -35,7 +35,7 @@ SQLite 保存完整行程
 - 当前消息、权威状态、待回答字段、Skill 契约、长期偏好、最近完整轮次和滚动摘要组成专属上下文。
 - 用户明确说“记住/忘记”时，保存或删除跨会话稳定偏好；当前明确输入始终优先。
 - 意图模型不设置生成 Token 或会话累计 Token 硬上限，前端只记录成功调用的实际或估算用量。
-- 相同意图提示先读 SQLite 精确结果缓存；同一进程的并发请求只产生一次模型调用。
+- 相同意图提示先读 PostgreSQL 精确结果缓存；同一进程的并发请求只产生一次模型调用。
 - “省域推荐”和“周边推荐”先收集结构化需求，不生成缺少数据支持的城市结论。
 - 具体城市、日期和预算完整后，以消息版本作为幂等键创建一次现有规划会话。
 - 创建 1～7 天、国内单目的地的持久规划会话，页面轮询独立步骤状态。
@@ -49,6 +49,8 @@ SQLite 保存完整行程
 - LLM 只能润色摘要、主题和提示，不能修改地点、车票、酒店、天气、路线或价格。
 - 结果页支持地点详情、真实路线地图、每日预算、拖拽/按钮排序和单日局部重算。
 - 会话支持幂等创建、取消、重试和重启恢复；失败时不保存半成品。
+- 浏览器通过 HttpOnly 匿名 Cookie 获得访客身份；所有对话、规划和行程查询都同时校验访客 ID。
+- PostgreSQL 唯一约束提供跨进程幂等保障；Redis 多 Worker 协调属于后续 PR，不在当前运行链路中。
 
 ## 架构
 
@@ -73,7 +75,10 @@ backend/app/
   travel_budget.py      经验预算、真实车票/酒店报价合并与超额提示
   travel_export.py      已校验行程的 Markdown 导出
   catalog.py            PostgreSQL 地点、行政区和附近 POI 查询
-  storage.py            当前阶段的行程、会话和 Provider 缓存 SQLite 实现
+  storage.py            PostgreSQL 业务 Repository、事务、幂等和 revision 更新
+  identity.py           匿名 Cookie、Token 哈希和旧数据认领
+  database/app.sql      PostgreSQL app Schema 与中文 COMMENT
+  scripts/              一次性 SQLite 只读迁移工具
   providers/
     base.py             MCP 生命周期、缓存执行器、去重、并发、重试和熔断
     maps.py             本地优先、调度和交通降级策略，兼容既有导入
@@ -107,7 +112,8 @@ Vue → FastAPI main → TravelAssistantService → Dialogue Flow
                                       └─ PlanningRuntime → WorkbenchWorkflow
                                                             ├─ providers
                                                             ├─ TravelService
-                                                            └─ SQLite
+                                                             ├─ PostgreSQL app
+                                                             └─ PostgreSQL catalog
 ```
 
 LangGraph 只表达节点依赖，不承担事实判断、持久化或 Agent 自主循环。数据发现图在本地
@@ -128,9 +134,11 @@ POI 准备完成后并行执行去程、返程、酒店和天气；生成图依�
   供应商参数。
 - 明确天数、预算、人数、日期、确认和取消优先由快速解析处理；存在剩余语义才调用模型。
 - `message_id` 保证双击和重试幂等；状态与响应原子保存，模型失败时不推进版本。
-- SQLite 中 `travel_dialogue_sessions` 保存权威状态，`travel_dialogue_requests` 保存幂等响应；
-  `travel_memories` 保存显式长期偏好；OpenZLAgent 的 `conversation_turns` 与
-  `conversation_compactions` 保存完整轮次和滚动摘要。
+- PostgreSQL `app.dialoguesession` 保存权威状态，`app.dialoguerequest` 保存幂等响应；
+  `app.travelmemory` 保存显式长期偏好；OpenZLAgent 固定的 `app.session_turns` 与
+  `app.session_summaries` 保存完整轮次和滚动摘要。
+- 浏览器 Cookie 只保存随机 Token，数据库只保存哈希；访客资源查询必须同时匹配 `visitorid`
+  和资源 ID，资源不属于当前访客时统一返回 404。
 
 ## 数据边界
 
@@ -196,7 +204,7 @@ rgh.cmd login
 ```
 
 登录令牌默认保存在用户目录的 `.hotel-cli/token.json`；后端只在请求时读取，不写入
-SQLite、日志或 API 响应。酒店详情仅在用户打开抽屉时加载。未登录、认证失败、超时或
+PostgreSQL、日志或 API 响应。酒店详情仅在用户打开抽屉时加载。未登录、认证失败、超时或
 熔断时，住宿步骤回退本地 OSM 候选，不阻断行程。旧的 `DIDA_API_KEY` 配置仍兼容。
 
 当前工作台只接入搜索与详情。锁价、下单和支付属于真实消费操作，必须另行设计用户
@@ -231,6 +239,7 @@ POST   /api/assistant-sessions
 GET    /api/assistant-sessions/{id}
 POST   /api/assistant-sessions/{id}/messages
 GET    /api/assistant-skills
+POST   /api/visitor/claim
 GET    /api/assistant-memories
 DELETE /api/assistant-memories/{key}
 
@@ -257,10 +266,13 @@ GET    /ready
 旧 `POST /api/trips` 保留为兼容快速入口，网页不再使用。创建会话建议携带
 `Idempotency-Key`，相同键会返回原会话。
 
+除 `/health`、`/ready` 和 `/api/assistant-skills` 外，接口都需要浏览器的
+`openzltravelvisitor` HttpOnly Cookie。Cookie 只保存随机 Token，后端写入 SHA-256 哈希；
+迁移旧 SQLite 后得到的认领码通过 `POST /api/visitor/claim` 使用一次，24 小时后失效。
+
 ## 缓存、恢复与降级
 
-`provider_cache` 与会话保存在 `DATABASE_PATH` 指向的 SQLite 中，启用 WAL 和 busy
-timeout。缓存键不包含 API Key：
+`app.providercache` 与业务会话保存在 PostgreSQL 中，连接池默认 2～20。缓存键不包含 API Key：
 
 | 数据 | TTL |
 |---|---:|
@@ -277,12 +289,9 @@ timeout。缓存键不包含 API Key：
 认证失败、限流和业务错误不重试。服务重启后恢复 `searching` / `generating` 会话；如果
 完整行程已经保存，恢复任务直接标记完成，不重复写入。
 
-当前不引入 Redis。TREK 等成熟单容器旅行产品同样可以 SQLite 为主存储；FloatTrip 将
-Redis 作为可选外部查询缓存并允许无 Redis 运行。本项目已有 SQLite WAL、TTL 缓存和
-进程内请求合并，在单用户、单 Worker 下增加 Redis 只会扩大运维与故障面。出现多 Worker、
-多实例、分布式任务队列、跨实例限流或 SQLite 写竞争后，再以现有 CacheStore 边界替换为
-Redis。模型端 KV Cache 不由应用持有；仅在供应商明确支持时设置 `INTENT_PROMPT_CACHE_KEY`，
-并通过返回的 cached token 指标验证是否真正命中。
+当前 PR 2 使用 PostgreSQL 处理共享状态、事务和跨进程唯一约束，仍保持单 Uvicorn Worker。
+Redis 协调、分布式锁、任务租约和多 Worker 属于后续 PR 3；模型端 KV Cache 不由应用持有，
+仅在供应商明确支持时设置 `INTENT_PROMPT_CACHE_KEY`，并通过返回的 cached token 指标验证是否真正命中。
 
 降级规则：12306 失败可自行安排，RollingGo 失败回退 OSM，天气失败标记未知，高德路线失败
 使用本地估算。地点未命中允许高德兜底；PostgreSQL 连接故障直接返回
@@ -299,8 +308,10 @@ Redis。模型端 KV Cache 不由应用持有；仅在供应商明确支持时�
 ```
 
 `-Runtime` 会生成被 Git 忽略的 `backend/.env.runtime.local`，不会改写已有 `.env`。正常
-运行不再读取 `backend/data/catalog.sqlite3`；只有显式设置
-`CATALOG_SQLITE_ROLLBACK=true` 才启用旧目录。
+运行不再读取 `backend/data/catalog.sqlite3`。旧 SQLite 只由一次性迁移脚本只读打开，
+迁移完成后通过认领码转移到当前匿名访客。
+
+完整初始化、迁移和认领步骤见 [OPERATIONS.md](OPERATIONS.md)。
 
 原始 OpenStreetMap、GeoNames、AreaCity 和 Modood 数据、表结构、许可证及全量构建方式见
 [DATABASE.md](DATABASE.md)。
@@ -309,7 +320,7 @@ Redis。模型端 KV Cache 不由应用持有；仅在供应商明确支持时�
 
 ```powershell
 cd backend
-python -m ruff check app tests
+python -m ruff check app tests scripts
 python -m mypy app
 python -m pytest -q
 
@@ -318,12 +329,12 @@ npm.cmd test
 npm.cmd run build
 ```
 
-自动测试全部使用 Fake Provider 和临时 SQLite，不读取 `.env`，也不访问真实高德、12306、
-RollingGo、DIDA、Open-Meteo 或模型服务。真实服务冒烟测试必须与离线门禁分开执行。
+单元测试使用 Fake Provider 和测试专用临时 SQLite；PostgreSQL 集成测试使用本地 `app` Schema，
+不访问真实高德、12306、RollingGo、DIDA、Open-Meteo 或模型服务。真实服务冒烟测试必须与离线门禁分开执行。
 
 ## 并发实验室
 
-当前单 Worker + SQLite 的容量基线使用独立 Docker Compose、Fake Upstream 和 Locust 测量，
+当前单 Worker + PostgreSQL 的容量基线使用独立 Docker Compose、Fake Upstream 和 Locust 测量，
 不读取真实密钥，也不修改生产 API。先执行 10 用户冒烟：
 
 ```powershell
@@ -335,7 +346,7 @@ RollingGo、DIDA、Open-Meteo 或模型服务。真实服务冒烟测试必须�
 
 ## 当前边界
 
-V0.5 仍是本地单用户、国内单目的地、单 Uvicorn Worker。长期记忆只保存用户明确授权的
+V0.5 仍是匿名访客、国内单目的地、单 Uvicorn Worker。长期记忆只保存用户明确授权的
 常用出发地、旅行/饮食偏好、节奏、住宿档次和市内交通方式，不保存完整聊天、证件、订单、
 日期、预算或供应商结果。当前不实现登录、支付、自动下单、多城市、真实省域/周边推荐、
 RAG、多 Agent、语音或 PDF；OpenZLAgent 只通过公共接口复用，不承载旅行业务代码。

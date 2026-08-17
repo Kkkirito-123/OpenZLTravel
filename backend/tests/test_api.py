@@ -8,9 +8,9 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import ApplicationContainer, app, get_planning_runtime, get_travel_service
-from app.storage import SqliteTripRepository
 from app.travel import TravelService
 from tests.fakes import FakeMapProvider, FakePlanner
+from tests.sqlite_repository import SqliteTripRepository
 from tests.test_workbench import make_runtime, planning_request
 
 
@@ -51,11 +51,14 @@ def test_local_frontend_cors_allows_dynamic_vite_port() -> None:
 async def test_application_container_closes_runtime_and_all_http_clients(tmp_path: Path) -> None:
     """容器关闭必须回收后台任务、同步地图客户端和异步 MCP 连接池。"""
 
+    if not Settings().database_url:
+        pytest.skip("未配置 PostgreSQL")
     container = ApplicationContainer(
         Settings(
-            database_path=str(tmp_path / "container.sqlite3"),
-            catalog_path=str(tmp_path / "missing-catalog.sqlite3"),
-            catalog_sqlite_rollback=True,
+            database_pool_min_size=1,
+            database_pool_max_size=2,
+            catalog_pool_min_size=1,
+            catalog_pool_max_size=2,
             rollinggo_hotel_token_path=str(tmp_path / "missing-token.json"),
             llm_api_key="",
             llm_model="",

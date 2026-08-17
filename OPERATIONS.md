@@ -1,7 +1,7 @@
 # OpenZLTravel 运行维护
 
-OpenZLTravel 当前面向本地单用户、单 Uvicorn Worker。SQLite 同时保存行程、规划会话、
-对话状态和带 TTL 的 Provider 缓存；不要把同一个数据库文件挂给多个应用实例写入。
+OpenZLTravel 当前面向匿名访客、单 Uvicorn Worker。PostgreSQL 同时保存行程、规划会话、
+对话状态和带 TTL 的 Provider 缓存；Redis 多 Worker 协调属于后续 PR。
 
 ## 启动
 
@@ -25,6 +25,22 @@ $env:SERVER_PORT = "8001"
 mcp-12306
 ```
 
+## 首次 PostgreSQL 初始化与旧数据迁移
+
+```powershell
+cd C:\Users\14405\Desktop\OpenZLAgent-refactor\examples\openzltravel
+.\catalog.ps1 -Runtime
+
+# 先停止仍在写旧 SQLite 的后端，再执行一次性只读迁移
+cd backend
+python -m scripts.migrate_sqlite_to_postgres db\openzltravel.sqlite3 `
+  --claim-output db\legacy-claim.txt
+```
+
+`-Runtime` 会创建 `app` Schema、授予 `travelapp` 权限，并把 `DATABASE_URL` 写入被 Git
+忽略的 `.env.runtime.local`。迁移以源文件 SHA-256 防重复，任何表失败都会整体回滚；原
+SQLite 不修改、不删除。认领码有效 24 小时，通过 `POST /api/visitor/claim` 使用一次。
+
 ## 就绪检查
 
 `/health` 只确认 HTTP 服务存活；`/ready` 不访问外网，展示本地依赖与配置状态。
@@ -38,7 +54,7 @@ Invoke-RestMethod http://127.0.0.1:8000/ready
 
 | 字段 | 正常值 | 异常后的可用行为 |
 |---|---|---|
-| `database` | `ok` | 不能创建或恢复会话，应先修复数据库路径与权限。 |
+| `database` | `ready` | 不能创建或恢复会话，应先修复 `DATABASE_URL`、数据库权限和连接池。 |
 | `catalog` | `ready` | `missing` 时城市/POI 会按配置尝试高德兜底。 |
 | `rail_mcp` | `configured` | 仅表示地址已配置，不代表 12306 服务已启动。 |
 | `hotel_provider` | `rollinggo_oauth` 或 `dida_token` | 未登录时使用本地 OSM 酒店。 |
@@ -73,17 +89,16 @@ searching → awaiting_selection → generating → completed
 | `rail_*` | 12306 MCP 未运行、超时或预售范围外 | 检查 `RAIL_MCP_URL` 和 MCP 进程；可选择自行安排往返。 |
 | `rollinggo_login_required` | 本机 RollingGo OAuth 令牌不存在或失效 | 执行 `rgh.cmd login`；住宿搜索会回退本地酒店。 |
 | `intent_not_configured` / `intent_timeout` | LLM 未配置或响应慢 | 检查 LLM 配置与网络；使用 `/plan` 继续表单规划。 |
-| `database is locked` | 多进程同时写 SQLite | 确认只有一个 Uvicorn Worker 和一个本地应用实例，停止重复进程后重启。 |
+| `database_unavailable` | PostgreSQL 连接池不可用 | 检查 `DATABASE_URL`、PostgreSQL 容器和 `/ready`，不要直接放大高德兜底流量。 |
 
 不要通过无限重试规避限流或认证错误。认证失败、业务错误和结构错误在代码中被设计为不重试，
 以免重复消耗 Key 或造成重复任务。
 
 ## 安全与备份
 
-- `backend/.env`、`frontend/.env`、RollingGo OAuth 令牌和 SQLite 数据均不提交 Git。
+- `backend/.env`、`frontend/.env`、RollingGo OAuth 令牌和数据库备份均不提交 Git。
 - 日志、截图和问题报告不要粘贴真实 Key、用户对话、订单信息或原始供应商响应。
-- 备份前先停止后端，再复制 `backend/db/openzltravel.sqlite3`。运行中的 SQLite 文件不应通过
-  云盘同步工具进行并发写入。
+- PostgreSQL 备份使用 `pg_dump`；旧 SQLite 只在迁移前保留只读原文件，不在运行时继续写入。
 - 公开数据目录和缓存可以重新生成；行程与会话数据库是需要保护的用户数据。
 
 ## 发布前验证
@@ -92,7 +107,7 @@ searching → awaiting_selection → generating → completed
 
 ```powershell
 cd backend
-python -m ruff check app tests
+python -m ruff check app tests scripts
 python -m mypy app
 python -m pytest -q
 

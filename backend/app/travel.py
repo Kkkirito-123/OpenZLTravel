@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import cast
 from uuid import UUID, uuid4
 
-from app.errors import AppError, ConflictError, DraftError, NotFoundError
+from app.errors import AppError, ConflictError, DraftError, ResourceNotFoundError
 from app.models import (
     AccommodationPlan,
     CandidateCatalog,
@@ -33,7 +33,7 @@ from app.models import (
     WeatherDay,
 )
 from app.providers import MapProvider, Planner, TransportResult
-from app.storage import TripRepository
+from app.storage import UNSCOPED_VISITOR_ID, TripRepository
 from app.travel_budget import (
     apply_accommodation,
     apply_selected_costs,
@@ -60,7 +60,9 @@ class TravelService:
         self.planner = planner
         self.repository = repository
 
-    def create(self, request: TravelRequest) -> Itinerary:
+    def create(
+        self, request: TravelRequest, visitor_id: UUID = UNSCOPED_VISITOR_ID
+    ) -> Itinerary:
         """生成并保存一份经过事实校验的完整行程。"""
 
         city = self.map_provider.resolve_city(request.destination)
@@ -71,7 +73,7 @@ class TravelService:
         draft = self._plan_with_one_repair(request, candidates)
         itinerary = self._build_itinerary(request, city, draft, candidates, weather, None)
         # 所有外部查询和业务校验都成功后才保存，避免历史记录出现半成品。
-        self.repository.save(itinerary, request)
+        self.repository.save(itinerary, request, visitor_id)
         return itinerary
 
     def build_itinerary(
@@ -168,18 +170,20 @@ class TravelService:
             accommodation=accommodation,
         )
 
-    async def create_async(self, request: TravelRequest) -> Itinerary:
+    async def create_async(
+        self, request: TravelRequest, visitor_id: UUID = UNSCOPED_VISITOR_ID
+    ) -> Itinerary:
         """通过 LangGraph 编排异步生成；测试替身仍兼容旧同步接口。"""
 
         if not hasattr(self.map_provider, "get_transport_async"):
             import asyncio
 
-            return await asyncio.to_thread(self.create, request)
+            return await asyncio.to_thread(self.create, request, visitor_id)
         from app.workflow import TravelWorkflow
 
         itinerary = await TravelWorkflow(self).run(request)
         # 只有图中所有事实和规则校验完成后才写入一次，避免半成品历史记录。
-        self.repository.save(itinerary, request)
+        self.repository.save(itinerary, request, visitor_id)
         return itinerary
 
     def _plan_with_one_repair(
@@ -308,29 +312,36 @@ class TravelService:
                 routes.append(self.map_provider.get_route(from_poi, to_poi))
         return routes
 
-    def get(self, trip_id: UUID) -> Itinerary:
+    def get(
+        self, trip_id: UUID, visitor_id: UUID = UNSCOPED_VISITOR_ID
+    ) -> Itinerary:
         """读取完整行程，不存在时抛出稳定业务错误。"""
 
-        itinerary = self.repository.get(trip_id)
+        itinerary = self.repository.get(trip_id, visitor_id)
         if itinerary is None:
-            raise NotFoundError()
+            raise ResourceNotFoundError("行程不存在")
         return itinerary
 
-    def list(self) -> list[TripSummary]:
+    def list(self, visitor_id: UUID = UNSCOPED_VISITOR_ID) -> list[TripSummary]:
         """返回历史行程摘要。"""
 
-        return self.repository.list()
+        return self.repository.list(visitor_id)
 
-    def delete(self, trip_id: UUID) -> None:
+    def delete(self, trip_id: UUID, visitor_id: UUID = UNSCOPED_VISITOR_ID) -> None:
         """删除指定行程，不存在时抛出稳定业务错误。"""
 
-        if not self.repository.delete(trip_id):
-            raise NotFoundError()
+        if not self.repository.delete(trip_id, visitor_id):
+            raise ResourceNotFoundError("行程不存在")
 
-    def alternatives(self, trip_id: UUID, candidates: CandidateCatalog) -> TripAlternatives:
+    def alternatives(
+        self,
+        trip_id: UUID,
+        candidates: CandidateCatalog,
+        visitor_id: UUID = UNSCOPED_VISITOR_ID,
+    ) -> TripAlternatives:
         """返回编辑时允许引用的真实候选景点。"""
 
-        itinerary = self.get(trip_id)
+        itinerary = self.get(trip_id, visitor_id)
         return TripAlternatives(
             trip_id=trip_id,
             revision=itinerary.revision,
@@ -343,13 +354,14 @@ class TravelService:
         day_index: int,
         edit: DayEditRequest,
         candidates: CandidateCatalog,
+        visitor_id: UUID = UNSCOPED_VISITOR_ID,
     ) -> Itinerary:
         """编辑一天并只重算该日路线与全程预算。"""
 
-        itinerary = self.get(trip_id)
-        request = self.repository.get_request(trip_id)
+        itinerary = self.get(trip_id, visitor_id)
+        request = self.repository.get_request(trip_id, visitor_id)
         if request is None:
-            raise NotFoundError()
+            raise ResourceNotFoundError("行程不存在")
         if itinerary.revision != edit.expected_revision:
             raise ConflictError()
         if not 1 <= day_index <= len(itinerary.days):
@@ -383,7 +395,12 @@ class TravelService:
                 "warnings": replace_budget_limit_warning(itinerary.warnings, request, budget),
             }
         )
-        if not self.repository.save_if_revision(updated, request, edit.expected_revision):
+        if not self.repository.save_if_revision(
+            updated,
+            request,
+            edit.expected_revision,
+            visitor_id,
+        ):
             raise ConflictError()
         return updated
 
