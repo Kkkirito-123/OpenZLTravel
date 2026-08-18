@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -21,6 +20,7 @@ from re_zlagent.harness.conversation import (  # type: ignore[import-untyped]
     ConversationContext,
 )
 
+from app.coordination import Coordination, LocalCoordination
 from app.dialogue import (
     CommandEffects,
     CommandGeneration,
@@ -97,6 +97,7 @@ class TravelAssistantService:
         city_resolver: CityResolver,
         planning_runtime: PlanningStarter,
         command_generator: TravelCommandGenerator | None,
+        coordination: Coordination | None = None,
     ) -> None:
         self._repository = repository
         self._conversations = conversations
@@ -104,7 +105,7 @@ class TravelAssistantService:
         self._planning_runtime = planning_runtime
         self._command_generator = command_generator
         self._context = TravelContextAssembler()
-        self._locks: dict[tuple[UUID, UUID], asyncio.Lock] = {}
+        self._coordination = coordination or LocalCoordination()
 
     def create(
         self, visitor_id: UUID = UNSCOPED_VISITOR_ID
@@ -173,7 +174,7 @@ class TravelAssistantService:
     ) -> AssistantTurnResponse:
         """处理一条消息；同一 message_id 永远复用第一次成功响应。"""
 
-        async with self._lock(session_id, visitor_id):
+        async with self._coordination.session_lock(session_id):
             state = self._require_state(session_id, visitor_id)
             cached = self._repository.get_dialogue_response(
                 session_id,
@@ -336,15 +337,6 @@ class TravelAssistantService:
             "同一个 message_id 不能用于不同消息",
             409,
         )
-
-    def _lock(self, session_id: UUID, visitor_id: UUID) -> asyncio.Lock:
-        key = (visitor_id, session_id)
-        lock = self._locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._locks[key] = lock
-        return lock
-
 
 def _turn_metadata(
     context: ConversationContext,

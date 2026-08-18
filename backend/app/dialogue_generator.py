@@ -31,6 +31,7 @@ from re_zlagent.harness.model.openai_compatible import (  # type: ignore[import-
     UrllibChatCompletionTransport,
 )
 
+from app.coordination import Coordination
 from app.dialogue_commands import (
     CommandGeneration,
     GeneratedCommands,
@@ -94,6 +95,7 @@ class TravelCommandGenerator:
         cache_ttl_seconds: int = 3_600,
         cache_namespace: str = "default",
         max_context_chars: int = 5_000,
+        coordination: Coordination | None = None,
     ) -> None:
         self._model = model
         self._timeout_seconds = timeout_seconds
@@ -101,6 +103,7 @@ class TravelCommandGenerator:
         self._cache = cache
         self._cache_ttl_seconds = cache_ttl_seconds
         self._cache_namespace = cache_namespace
+        self._coordination = coordination
         self._inflight: dict[str, asyncio.Task[GeneratedCommands]] = {}
         self._inflight_lock = asyncio.Lock()
 
@@ -208,15 +211,22 @@ class TravelCommandGenerator:
     async def _complete(self, messages: tuple[ModelMessage, ...]) -> ModelResponse:
         """不限制生成 Token，只约束超时并记录实际或估算用量。"""
 
-        configurable = getattr(self._model, "complete_with_options", None)
-        if callable(configurable):
-            completion = cast(Callable[..., Awaitable[ModelResponse]], configurable)(
-                messages, response_format="json_object"
-            )
-        else:
-            completion = self._model.complete(messages)
+        async def invoke() -> ModelResponse:
+            configurable = getattr(self._model, "complete_with_options", None)
+            if callable(configurable):
+                completion = cast(Callable[..., Awaitable[ModelResponse]], configurable)(
+                    messages, response_format="json_object"
+                )
+            else:
+                completion = self._model.complete(messages)
+            return await completion
+
         try:
-            response = await asyncio.wait_for(completion, timeout=self._timeout_seconds)
+            if self._coordination is None:
+                response = await asyncio.wait_for(invoke(), timeout=self._timeout_seconds)
+            else:
+                async with self._coordination.provider_slot("llm"):
+                    response = await asyncio.wait_for(invoke(), timeout=self._timeout_seconds)
             return _attach_usage_estimate(response, messages)
         except TimeoutError as error:
             raise AppError("intent_timeout", "意图识别超时，请重试", 504) from error

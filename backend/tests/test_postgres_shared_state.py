@@ -193,6 +193,7 @@ def test_sqlite_migration_is_atomic_and_rejects_duplicate_source(
 
     assert counts["trips"] == 1
     assert counts["planning_sessions"] == 1
+    assert counts["provider_cache_skipped"] == 1
     assert postgres_repository.get(itinerary.trip_id, legacy_id) is not None
     assert len(claim_token) >= 32
     with pytest.raises(RuntimeError, match="已经迁移"):
@@ -323,7 +324,6 @@ def _cleanup_visitors(
 def _cleanup_import(repository: PostgresTravelRepository, source_hash: str) -> None:
     with repository.pool.connection() as connection:
         connection.execute("DELETE FROM app.importrecord WHERE sourcehash = %s", (source_hash,))
-        connection.execute("DELETE FROM app.providercache WHERE provider = 'migration-test'")
 
 
 def _fetch_one(

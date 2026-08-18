@@ -134,7 +134,7 @@ class CityResolver(Protocol):
 
 
 class IntentCache(Protocol):
-    """意图结果缓存的最小边界，当前由 SQLite provider_cache 实现。"""
+    """意图结果缓存的最小边界，当前由 Redis Provider 缓存实现。"""
 
     def get_cache(self, provider: str, key: str) -> Any | None:
         """读取未过期的缓存值。"""

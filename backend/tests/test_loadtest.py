@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -163,7 +162,7 @@ def test_live_probe_applies_hard_caps(monkeypatch) -> None:
     assert validate_limits("hotel", 100, 100) == (6, 2)
 
 
-def test_report_combines_locust_fake_and_sqlite_metrics(tmp_path: Path) -> None:
+def test_report_combines_locust_fake_and_database_metrics(tmp_path: Path) -> None:
     """报告必须同时包含 HTTP、Provider、缓存和重复结果指标。"""
 
     results = tmp_path / "results"
@@ -174,7 +173,7 @@ def test_report_combines_locust_fake_and_sqlite_metrics(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (results / "locust_failures.csv").write_text(
-        "Method,Name,Error,Occurrences\nGET,/health,database is locked,2\n",
+        "Method,Name,Error,Occurrences\nGET,/health,database_unavailable,2\n",
         encoding="utf-8",
     )
     (results / "locust_stats_history.csv").write_text(
@@ -196,7 +195,7 @@ def test_report_combines_locust_fake_and_sqlite_metrics(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (results / "app.log").write_text(
-        "ERROR: Exception in ASGI application\nsqlite3.OperationalError: database is locked\n",
+        "ERROR: Exception in ASGI application\ndatabase_unavailable\n",
         encoding="utf-8",
     )
     (results / "fake-stats.json").write_text(
@@ -211,13 +210,13 @@ def test_report_combines_locust_fake_and_sqlite_metrics(tmp_path: Path) -> None:
     (results / "business-counters.json").write_text(
         json.dumps({"assistant_messages_completed": 1}), encoding="utf-8"
     )
-    database = tmp_path / "runtime.sqlite3"
+    database = tmp_path / "database-stats.json"
     _create_report_database(database)
 
     report = write_report(results, database)
 
     assert report["http"]["requests"] == 100
-    assert report["http"]["sqlite_locked"] == 1
+    assert report["http"]["database_errors"] == 3
     assert report["http"]["unhandled_exceptions"] == 1
     assert report["database"]["cache_hit_rate"] == 1
     assert report["providers"]["rail"]["calls"] == 4
@@ -227,27 +226,22 @@ def test_report_combines_locust_fake_and_sqlite_metrics(tmp_path: Path) -> None:
 
 
 def _create_report_database(path: Path) -> None:
-    session = {
-        "steps": [
+    path.write_text(
+        json.dumps(
             {
-                "name": "rail_outbound",
-                "status": "completed",
-                "cache_hit": True,
-                "duration_ms": 20,
+                "available": True,
+                "planning_sessions": 1,
+                "planning_statuses": {"awaiting_selection": 1},
+                "assistant_sessions": 0,
+                "assistant_requests": 0,
+                "trips": 0,
+                "duplicate_trips": 0,
+                "provider_cache_entries": 1,
+                "completed_steps": 1,
+                "cache_hits": 1,
+                "cache_hit_rate": 1,
+                "average_step_duration_ms": 20,
             }
-        ]
-    }
-    with sqlite3.connect(path) as connection:
-        connection.execute(
-            "CREATE TABLE planning_sessions (status TEXT, session_json TEXT)"
-        )
-        connection.execute(
-            "CREATE TABLE trips (itinerary_json TEXT)"
-        )
-        connection.execute("CREATE TABLE travel_dialogue_sessions (session_id TEXT)")
-        connection.execute("CREATE TABLE travel_dialogue_requests (message_id TEXT)")
-        connection.execute("CREATE TABLE provider_cache (cache_key TEXT)")
-        connection.execute(
-            "INSERT INTO planning_sessions VALUES (?, ?)",
-            ("awaiting_selection", json.dumps(session)),
-        )
+        ),
+        encoding="utf-8",
+    )

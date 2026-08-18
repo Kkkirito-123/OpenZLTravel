@@ -44,7 +44,7 @@ from app.providers.geo import (
 
 
 class JsonResponseCache:
-    """兼容旧部署的 JSON 高德缓存；新应用主链路使用 SQLite。"""
+    """兼容独立测试的 JSON 高德缓存；生产主链路使用 Redis。"""
 
     def __init__(self, path: str, ttl_seconds: int) -> None:
         self.path = Path(path)
@@ -101,7 +101,7 @@ class JsonResponseCache:
 
 
 class StoreResponseCache:
-    """把高德原始响应放入统一 Provider 缓存，避免 JSON 文件并发覆盖。"""
+    """把高德原始响应放入统一 Redis 缓存。"""
 
     def __init__(self, store: CacheStore, provider: str = "amap") -> None:
         self.store = store
@@ -114,7 +114,7 @@ class StoreResponseCache:
         return cast(dict[str, Any], value) if isinstance(value, dict) else None
 
     def set(self, key: str, payload: dict[str, Any], ttl_seconds: int) -> None:
-        """按接口新鲜度写入 SQLite 缓存。"""
+        """按接口新鲜度写入 Redis 缓存。"""
 
         self.store.set_cache(self.provider, key, payload, ttl_seconds)
 

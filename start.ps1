@@ -1,5 +1,6 @@
 param(
-    [switch]$Install
+    [switch]$Install,
+    [switch]$Production
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,7 +23,18 @@ if ($Install) {
 }
 
 Write-Host "启动后端: http://127.0.0.1:8000"
-Start-Process -WindowStyle Hidden -FilePath $python -ArgumentList "-m", "uvicorn", "app.main:app", "--app-dir", $backendRoot, "--host", "127.0.0.1", "--port", "8000", "--reload"
+$backendArguments = @(
+    "-m", "uvicorn", "app.main:app", "--app-dir", $backendRoot,
+    "--host", "127.0.0.1", "--port", "8000"
+)
+if ($Production) {
+    $workers = if ($env:WEB_WORKERS) { [int]$env:WEB_WORKERS } else { 4 }
+    $backendArguments += @("--workers", [string]$workers)
+}
+else {
+    $backendArguments += "--reload"
+}
+Start-Process -WindowStyle Hidden -FilePath $python -ArgumentList $backendArguments
 
 Write-Host "启动前端: http://127.0.0.1:5173"
 Push-Location $frontendRoot

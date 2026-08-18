@@ -137,21 +137,6 @@ COMMENT ON COLUMN app.travelmemory.sourcesessionid IS '最近一次明确修改�
 COMMENT ON COLUMN app.travelmemory.createdat IS '偏好首次创建时间';
 COMMENT ON COLUMN app.travelmemory.updatedat IS '偏好最近更新时间';
 
-CREATE TABLE IF NOT EXISTS app.providercache (
-    provider TEXT NOT NULL,
-    cachekey TEXT NOT NULL,
-    payloadjson JSONB NOT NULL,
-    expiresat TIMESTAMPTZ NOT NULL,
-    updatedat TIMESTAMPTZ NOT NULL,
-    PRIMARY KEY (provider, cachekey)
-);
-COMMENT ON TABLE app.providercache IS '迁移阶段共享 Provider TTL 缓存';
-COMMENT ON COLUMN app.providercache.provider IS '供应商稳定名称';
-COMMENT ON COLUMN app.providercache.cachekey IS '不含密钥的稳定缓存键';
-COMMENT ON COLUMN app.providercache.payloadjson IS '供应商解析结果 JSON';
-COMMENT ON COLUMN app.providercache.expiresat IS '缓存失效时间';
-COMMENT ON COLUMN app.providercache.updatedat IS '缓存最近更新时间';
-
 CREATE TABLE IF NOT EXISTS app.legacyclaim (
     claimid UUID PRIMARY KEY,
     visitorid UUID NOT NULL REFERENCES app.visitor(visitorid),
@@ -236,11 +221,12 @@ CREATE INDEX IF NOT EXISTS planningsessionvisitoridx
 CREATE INDEX IF NOT EXISTS planningsessionstatusidx ON app.planningsession(status, createdat);
 CREATE INDEX IF NOT EXISTS dialoguesessionvisitoridx
     ON app.dialoguesession(visitorid, updatedat DESC);
-CREATE INDEX IF NOT EXISTS providercacheexpiresidx ON app.providercache(expiresat);
 CREATE INDEX IF NOT EXISTS session_turns_hot_idx
     ON app.session_turns(session_id, archived, sequence DESC);
 
 INSERT INTO app.schemaversion(version) VALUES (1) ON CONFLICT (version) DO NOTHING;
+DROP TABLE IF EXISTS app.providercache;
+INSERT INTO app.schemaversion(version) VALUES (2) ON CONFLICT (version) DO NOTHING;
 
 GRANT USAGE ON SCHEMA app TO travelapp;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA app TO travelapp;

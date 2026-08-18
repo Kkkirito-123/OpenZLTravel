@@ -1,6 +1,6 @@
 """PostgreSQL 业务持久化。
 
-本模块集中访客、行程、规划、对话、长期偏好和临时 Provider 缓存。业务服务只传入
+本模块集中访客、行程、规划、对话和长期偏好。业务服务只传入
 ``visitorid`` 和领域模型，不接触 psycopg 行、SQL 或连接池对象。
 """
 
@@ -9,7 +9,7 @@ from __future__ import annotations
 import builtins
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID, uuid4
@@ -503,44 +503,6 @@ class PostgresTravelRepository:
                 visitor_id,
                 memory_upserts or {},
                 memory_deletes or set(),
-            )
-
-    def get_cache(self, provider: str, key: str) -> Any | None:
-        """读取共享 Provider 缓存；PR 3 会把它迁移到 Redis。"""
-
-        now = _now()
-        with self._connection() as connection:
-            row = connection.execute(
-                """
-                SELECT payloadjson, expiresat FROM app.providercache
-                WHERE provider = %s AND cachekey = %s
-                """,
-                (provider, key),
-            ).fetchone()
-            if row and row["expiresat"] <= now:
-                connection.execute(
-                    "DELETE FROM app.providercache WHERE provider = %s AND cachekey = %s",
-                    (provider, key),
-                )
-                return None
-        return row["payloadjson"] if row else None
-
-    def set_cache(self, provider: str, key: str, value: Any, ttl_seconds: int) -> None:
-        """保存共享 Provider 缓存。"""
-
-        now = _now()
-        with self._connection() as connection:
-            connection.execute(
-                """
-                INSERT INTO app.providercache
-                    (provider, cachekey, payloadjson, expiresat, updatedat)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (provider, cachekey) DO UPDATE SET
-                    payloadjson = excluded.payloadjson,
-                    expiresat = excluded.expiresat,
-                    updatedat = excluded.updatedat
-                """,
-                (provider, key, Jsonb(value), now + timedelta(seconds=ttl_seconds), now),
             )
 
     def claim_legacy(self, visitor_id: UUID, token_hash: str) -> None:

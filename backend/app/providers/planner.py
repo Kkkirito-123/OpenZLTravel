@@ -7,13 +7,15 @@
 import json
 import math
 from collections.abc import Sequence
+from contextlib import nullcontext
 from typing import Any, Protocol
 
 from openai import OpenAI
 from pydantic import ValidationError
 
 from app.config import Settings
-from app.errors import DraftError, ProviderError
+from app.coordination import Coordination
+from app.errors import AppError, DraftError, ProviderError
 from app.models import (
     CandidateCatalog,
     CopyEnhancement,
@@ -44,8 +46,9 @@ class Planner(Protocol):
 class LlmPlanner:
     """让模型做有限的结构化选择，不允许模型编造地图事实。"""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, coordination: Coordination | None = None) -> None:
         self.settings = settings
+        self.coordination = coordination
         self.client = OpenAI(
             api_key=settings.llm_api_key or "missing-key",
             base_url=settings.llm_base_url or None,
@@ -63,21 +66,29 @@ class LlmPlanner:
         if not self.settings.llm_api_key or not self.settings.llm_model:
             raise ProviderError("llm_not_configured", "尚未配置兼容模型的 API Key 或模型名")
         try:
-            response = self.client.chat.completions.create(
-                model=self.settings.llm_model,
-                temperature=0.2,
-                response_format={"type": "json_object"},
-                messages=[
-                    {"role": "system", "content": _system_prompt()},
-                    {"role": "user", "content": _user_prompt(request, candidates, feedback)},
-                ],
-            )
+            with self._slot():
+                response = self.client.chat.completions.create(
+                    model=self.settings.llm_model,
+                    temperature=0.2,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": _system_prompt()},
+                        {"role": "user", "content": _user_prompt(request, candidates, feedback)},
+                    ],
+                )
             content = response.choices[0].message.content or ""
             return ItineraryDraft.model_validate(json.loads(_clean_json(content)))
         except (ValidationError, json.JSONDecodeError, IndexError, TypeError) as exc:
             raise DraftError("模型返回的行程结构无法解析，请重试") from exc
+        except AppError:
+            raise
         except Exception as exc:
             raise ProviderError("llm_unavailable", "规划模型暂时不可用") from exc
+
+    def _slot(self) -> Any:
+        if self.coordination is None:
+            return nullcontext()
+        return self.coordination.sync_provider_slot("llm")
 
 
 class DeterministicPlanner:
@@ -156,8 +167,9 @@ class DeterministicPlanner:
 class CopyEnhancer:
     """可选润色确定性草稿，只允许返回摘要、主题和提示。"""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, coordination: Coordination | None = None) -> None:
         self.settings = settings
+        self.coordination = coordination
         self.client = OpenAI(
             api_key=settings.llm_api_key or "missing-key",
             base_url=settings.llm_base_url or None,
@@ -186,22 +198,25 @@ class CopyEnhancer:
             "rules": "只润色文案，themes 数量必须与输入一致，不添加地点或事实。",
         }
         try:
-            response = self.client.chat.completions.create(
-                model=self.settings.llm_model,
-                temperature=0.3,
-                response_format={"type": "json_object"},
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "只输出摘要、每日主题和旅行提示 JSON，不得新增任何事实。",
-                    },
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-                ],
-            )
+            with self._slot():
+                response = self.client.chat.completions.create(
+                    model=self.settings.llm_model,
+                    temperature=0.3,
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "只输出摘要、每日主题和旅行提示 JSON，不得新增任何事实。",
+                        },
+                        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                    ],
+                )
             content = response.choices[0].message.content or ""
             enhanced = CopyEnhancement.model_validate(json.loads(_clean_json(content)))
         except (ValidationError, json.JSONDecodeError, IndexError, TypeError) as exc:
             raise DraftError("文案增强结果无法解析") from exc
+        except AppError:
+            raise
         except Exception as exc:
             raise ProviderError("llm_unavailable", "文案增强暂时不可用") from exc
         if len(enhanced.themes) != len(draft.days):
@@ -213,6 +228,11 @@ class CopyEnhancer:
         return draft.model_copy(
             update={"summary": enhanced.summary, "days": days, "tips": enhanced.tips}
         )
+
+    def _slot(self) -> Any:
+        if self.coordination is None:
+            return nullcontext()
+        return self.coordination.sync_provider_slot("llm")
 
 
 def _nearest_neighbor(

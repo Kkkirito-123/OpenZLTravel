@@ -1,7 +1,7 @@
 # OpenZLTravel 运行维护
 
-OpenZLTravel 当前面向匿名访客、单 Uvicorn Worker。PostgreSQL 同时保存行程、规划会话、
-对话状态和带 TTL 的 Provider 缓存；Redis 多 Worker 协调属于后续 PR。
+OpenZLTravel 当前面向匿名访客。PostgreSQL 保存行程、规划会话和对话权威状态；Redis 保存
+可再生缓存，并协调多 Worker 的会话锁、Provider 并发、API 限流和后台任务租约。
 
 ## 启动
 
@@ -14,6 +14,13 @@ cd C:\Users\14405\Desktop\OpenZLAgent-refactor\examples\openzltravel
 
 脚本启动后端 `http://127.0.0.1:8000`，前端由 Vite 选择可用的本机端口。12306 MCP 是独立
 只读服务，需要单独启动；未启动时页面会显示车票步骤不可用，用户仍可选择“自行安排”。
+
+开发模式使用单 Worker 和热重载；生产式本地验证默认四 Worker：
+
+```powershell
+.\start.ps1 -Production
+$env:WEB_WORKERS = "6"  # 可选，下一次启动生效
+```
 
 执行 `npm.cmd install` 或 `npm.cmd audit fix` 后，需要停止并重新启动 Vite 开发服务。Vite
 可以热更新应用源码，但不会可靠地替换自身已经加载的内部依赖文件。
@@ -37,9 +44,10 @@ python -m scripts.migrate_sqlite_to_postgres db\openzltravel.sqlite3 `
   --claim-output db\legacy-claim.txt
 ```
 
-`-Runtime` 会创建 `app` Schema、授予 `travelapp` 权限，并把 `DATABASE_URL` 写入被 Git
-忽略的 `.env.runtime.local`。迁移以源文件 SHA-256 防重复，任何表失败都会整体回滚；原
-SQLite 不修改、不删除。认领码有效 24 小时，通过 `POST /api/visitor/claim` 使用一次。
+`-Runtime` 会创建 `app` Schema、启动 Redis、授予 `travelapp` 权限，并把 `DATABASE_URL`
+和 `REDIS_URL` 写入被 Git 忽略的 `.env.runtime.local`。Schema v2 会先迁移仍有效的旧
+Provider 缓存，再删除 `app.providercache`。SQLite 迁移以源文件 SHA-256 防重复，任何业务表
+失败都会整体回滚；原文件不修改、不删除。认领码有效 24 小时，只能使用一次。
 
 ## 就绪检查
 
@@ -56,6 +64,7 @@ Invoke-RestMethod http://127.0.0.1:8000/ready
 |---|---|---|
 | `database` | `ready` | 不能创建或恢复会话，应先修复 `DATABASE_URL`、数据库权限和连接池。 |
 | `catalog` | `ready` | `missing` 时城市/POI 会按配置尝试高德兜底。 |
+| `redis` | `ready` | 缓存可回源；会话写锁、Provider 槽和后台任务租约会拒绝新执行。 |
 | `rail_mcp` | `configured` | 仅表示地址已配置，不代表 12306 服务已启动。 |
 | `hotel_provider` | `rollinggo_oauth` 或 `dida_token` | 未登录时使用本地 OSM 酒店。 |
 | `intent_model` | `configured` | 缺失时聊天页不能识别意图，`/plan` 仍可用。 |
@@ -77,7 +86,9 @@ searching → awaiting_selection → generating → completed
 - `searching` / `generating` 在正常服务重启后自动恢复。
 - `completed` 已经保存完整行程，重启恢复不会重复写入。
 - `cancelled` 是终态，不能被迟到的后台任务重新推进。
-- Provider 缓存命中和进程内相同请求合并是正常优化，不代表外部数据永久最新。
+- Provider 缓存由 Redis 跨 Worker 共享；进程内相同请求仍会额外合并，不代表数据永久最新。
+- 任务租约 30 秒、每 10 秒续租；Worker 每 5 秒扫描一次 PostgreSQL 可恢复任务。
+- 租约续期失败时当前任务立即取消，等待其他 Worker 在租约过期后接管。
 
 ## 常见故障
 
@@ -90,6 +101,9 @@ searching → awaiting_selection → generating → completed
 | `rollinggo_login_required` | 本机 RollingGo OAuth 令牌不存在或失效 | 执行 `rgh.cmd login`；住宿搜索会回退本地酒店。 |
 | `intent_not_configured` / `intent_timeout` | LLM 未配置或响应慢 | 检查 LLM 配置与网络；使用 `/plan` 继续表单规划。 |
 | `database_unavailable` | PostgreSQL 连接池不可用 | 检查 `DATABASE_URL`、PostgreSQL 容器和 `/ready`，不要直接放大高德兜底流量。 |
+| `coordination_unavailable` | Redis 锁、槽或租约不可用 | 检查 `REDIS_URL` 和 Redis；这类能力 fail-close，不应通过重试绕过。 |
+| `session_busy` | 同一会话正在被其他 Worker 修改 | 等待当前请求完成后重试，不要并发覆盖。 |
+| `rate_limit_exceeded` | API 或 Provider 达到共享上限 | 等待窗口或槽位释放；不要提高上游并发来掩盖问题。 |
 
 不要通过无限重试规避限流或认证错误。认证失败、业务错误和结构错误在代码中被设计为不重试，
 以免重复消耗 Key 或造成重复任务。
@@ -99,7 +113,8 @@ searching → awaiting_selection → generating → completed
 - `backend/.env`、`frontend/.env`、RollingGo OAuth 令牌和数据库备份均不提交 Git。
 - 日志、截图和问题报告不要粘贴真实 Key、用户对话、订单信息或原始供应商响应。
 - PostgreSQL 备份使用 `pg_dump`；旧 SQLite 只在迁移前保留只读原文件，不在运行时继续写入。
-- 公开数据目录和缓存可以重新生成；行程与会话数据库是需要保护的用户数据。
+- Redis 只保存可再生缓存和短期协调状态，不替代 PostgreSQL 备份。
+- 公开数据目录和 Redis 缓存可以重新生成；行程与会话数据库是需要保护的用户数据。
 
 ## 发布前验证
 

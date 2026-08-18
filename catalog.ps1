@@ -84,9 +84,33 @@ function Initialize-RuntimeCredential {
     )
 }
 
+function Initialize-RedisCredential {
+    $catalogExisting = Get-Content -LiteralPath $catalogEnvFile -Encoding UTF8
+    if ($catalogExisting | Where-Object { $_ -match '^REDIS_PASSWORD=' }) {
+        return
+    }
+
+    $catalogBytes = New-Object byte[] 32
+    $catalogRandom = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $catalogRandom.GetBytes($catalogBytes)
+    }
+    finally {
+        $catalogRandom.Dispose()
+    }
+    $redisPassword = ($catalogBytes | ForEach-Object { $_.ToString("x2") }) -join ""
+    $catalogUpdated = @($catalogExisting) + "REDIS_PASSWORD=$redisPassword"
+    [System.IO.File]::WriteAllLines(
+        $catalogEnvFile,
+        $catalogUpdated,
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+}
+
 function Import-CatalogEnvironment {
     New-CatalogEnvironment
     Initialize-RuntimeCredential
+    Initialize-RedisCredential
     foreach ($catalogLine in Get-Content -LiteralPath $catalogEnvFile -Encoding UTF8) {
         $catalogValue = $catalogLine.Trim()
         if (-not $catalogValue -or $catalogValue.StartsWith("#")) {
@@ -103,10 +127,12 @@ function Import-CatalogEnvironment {
 function Write-RuntimeEnvironment {
     $catalogUrl = "postgresql://travelapp:$($env:TRAVELAPP_POSTGRES_PASSWORD)" +
         "@127.0.0.1:55432/openzltravelcatalog"
+    $redisUrl = "redis://:$($env:REDIS_PASSWORD)@127.0.0.1:56379/0"
     $catalogLines = @(
         "# 此文件由 catalog.ps1 生成，只包含本机应用运行配置，不要提交。",
         "DATABASE_URL=$catalogUrl",
-        "CATALOG_DATABASE_URL=$catalogUrl"
+        "CATALOG_DATABASE_URL=$catalogUrl",
+        "REDIS_URL=$redisUrl"
     )
     [System.IO.File]::WriteAllLines(
         $runtimeEnvFile,
@@ -164,8 +190,13 @@ function Start-CatalogDatabase {
             --format "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}" `
             openzltravelcatalog 2>$null
         if ($LASTEXITCODE -eq 0 -and $catalogHealth -eq "healthy") {
-            Write-Host "地点库已就绪：127.0.0.1:55432/openzltravelcatalog"
-            return
+            $redisHealth = & docker inspect `
+                --format "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}" `
+                openzltravelredis 2>$null
+            if ($LASTEXITCODE -eq 0 -and $redisHealth -eq "healthy") {
+                Write-Host "PostgreSQL 与 Redis 已就绪。"
+                return
+            }
         }
         Start-Sleep -Seconds 2
     }
@@ -175,9 +206,22 @@ function Start-CatalogDatabase {
 function Install-CatalogDependencies {
     param([switch]$IncludeOsmium)
 
-    $catalogImports = if ($IncludeOsmium) { "import psycopg, osmium" } else { "import psycopg" }
-    & $catalogPython -c $catalogImports 2>$null
-    if ($LASTEXITCODE -eq 0) {
+    $catalogImports = if ($IncludeOsmium) {
+        "import psycopg, osmium, redis"
+    }
+    else {
+        "import psycopg, redis"
+    }
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $catalogPython -c $catalogImports *> $null
+        $catalogImportExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    if ($catalogImportExitCode -eq 0) {
         return
     }
     Write-Host "正在安装地点库离线构建依赖..."
@@ -195,6 +239,17 @@ function Initialize-AppSchema {
     if ($LASTEXITCODE -ne 0) {
         throw "业务 app Schema 初始化失败。"
     }
+}
+
+function Move-ProviderCacheToRedis {
+    $catalogUrl = "postgresql://travelapp:$($env:TRAVELAPP_POSTGRES_PASSWORD)" +
+        "@127.0.0.1:55432/openzltravelcatalog"
+    $redisUrl = "redis://:$($env:REDIS_PASSWORD)@127.0.0.1:56379/0"
+    Invoke-CatalogModule -Arguments @(
+        "-m", "scripts.migrate_provider_cache_to_redis",
+        "--database-url", $catalogUrl,
+        "--redis-url", $redisUrl
+    )
 }
 
 function Invoke-CatalogModule {
@@ -228,6 +283,7 @@ if ($Build) {
 if ($Runtime) {
     Install-CatalogDependencies
     Invoke-CatalogModule -Arguments @("-m", "catalog_builder.runtime_access")
+    Move-ProviderCacheToRedis
     Initialize-AppSchema
     Write-RuntimeEnvironment
     Write-Host "已写入本地运行配置：backend/.env.runtime.local"

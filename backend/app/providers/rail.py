@@ -37,11 +37,12 @@ class RailProvider:
     ) -> tuple[list[RailOption], bool]:
         """并行查询余票和票价，再按车次合并。"""
 
-        key = stable_key(origin, destination, travel_date, direction, "direct")
+        origin_code, destination_code = await self._resolve_pair(origin, destination)
+        key = stable_key(origin_code, destination_code, travel_date, direction, "direct")
         payload, cache_hit = await self.executor.run(
             key,
             120,
-            lambda: self._search_payload(origin, destination, travel_date),
+            lambda: self._search_payload(origin_code, destination_code, travel_date),
         )
         return _direct_options(payload, direction, travel_date), cache_hit
 
@@ -50,11 +51,12 @@ class RailProvider:
     ) -> tuple[list[RailOption], bool]:
         """仅在无直达或用户主动展开时查询一次中转。"""
 
-        key = stable_key(origin, destination, travel_date, direction, "transfer")
+        origin_code, destination_code = await self._resolve_pair(origin, destination)
+        key = stable_key(origin_code, destination_code, travel_date, direction, "transfer")
         payload, cache_hit = await self.executor.run(
             key,
             120,
-            lambda: self._transfer_payload(origin, destination, travel_date),
+            lambda: self._transfer_payload(origin_code, destination_code, travel_date),
         )
         return _transfer_options(payload, direction, travel_date), cache_hit
 
@@ -72,11 +74,8 @@ class RailProvider:
         return _quoted_transfer(option, payloads)
 
     async def _search_payload(
-        self, origin: str, destination: str, travel_date: date
+        self, origin_code: str, destination_code: str, travel_date: date
     ) -> dict[str, Any]:
-        origin_code, destination_code = await asyncio.gather(
-            self._resolve_station(origin), self._resolve_station(destination)
-        )
         arguments = {
             "from_station": origin_code,
             "to_station": destination_code,
@@ -97,6 +96,14 @@ class RailProvider:
             "tickets": tickets,
             "prices": {} if isinstance(prices, BaseException) else prices,
         }
+
+    async def _resolve_pair(self, origin: str, destination: str) -> tuple[str, str]:
+        """先解析车站再进入车票查询槽，避免全局并发为一时发生重入等待。"""
+
+        return await asyncio.gather(
+            self._resolve_station(origin),
+            self._resolve_station(destination),
+        )
 
     async def _resolve_station(self, value: str) -> str:
         """把城市或车站名称解析为 12306 三字码，避免城市名直接查询失败。"""
@@ -131,10 +138,9 @@ class RailProvider:
         ]
         return list(await asyncio.gather(*operations, return_exceptions=True))
 
-    async def _transfer_payload(self, origin: str, destination: str, travel_date: date) -> Any:
-        origin_code, destination_code = await asyncio.gather(
-            self._resolve_station(origin), self._resolve_station(destination)
-        )
+    async def _transfer_payload(
+        self, origin_code: str, destination_code: str, travel_date: date
+    ) -> Any:
         return await self.client.call_tool(
             "query-transfer",
             {

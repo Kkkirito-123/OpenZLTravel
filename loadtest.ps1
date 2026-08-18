@@ -75,8 +75,12 @@ function Invoke-Experiment {
         Start-Environment $runDirectory $ScenarioName
         & docker compose -f $composeFile run --rm locust
         $locustExitCode = $LASTEXITCODE
-        # Locust 停止时可能仍有已返回 202 的后台发现任务，短暂排空后再复制恢复快照。
+        # Locust 停止时可能仍有已返回 202 的后台发现任务，短暂排空后再采集共享状态。
         Start-Sleep -Seconds 5
+        & docker compose -f $composeFile exec -T app `
+            python -m loadtests.database_snapshot |
+            Set-Content -Encoding utf8 (Join-Path $runDirectory "database-stats.json")
+        if ($LASTEXITCODE -ne 0) { throw "采集 PostgreSQL 与 Redis 统计失败。" }
     } finally {
         Invoke-Compose -ComposeArgs @("stop", "app", "fake-upstream")
     }
@@ -84,16 +88,10 @@ function Invoke-Experiment {
         Set-Content -Encoding utf8 (Join-Path $runDirectory "app.log")
     & docker compose -f $composeFile logs --no-color fake-upstream |
         Set-Content -Encoding utf8 (Join-Path $runDirectory "fake-upstream.log")
-    $runtimeDirectory = Join-Path $runDirectory "runtime"
-    New-Item -ItemType Directory -Path $runtimeDirectory -Force | Out-Null
-    $containerId = & docker compose -f $composeFile ps -aq app
-    if (-not $containerId) { throw "无法找到已停止的应用容器，不能复制 SQLite 快照。" }
-    & docker cp "${containerId}:/data/openzltravel.sqlite3" $runtimeDirectory
-    if ($LASTEXITCODE -ne 0) { throw "复制 SQLite 快照失败。" }
-    $database = Join-Path $runtimeDirectory "openzltravel.sqlite3"
     Push-Location (Join-Path $projectRoot "backend")
     try {
-        & $python -m loadtests.report --results $runDirectory --database $database
+        & $python -m loadtests.report --results $runDirectory `
+            --database-stats (Join-Path $runDirectory "database-stats.json")
     } finally {
         Pop-Location
     }

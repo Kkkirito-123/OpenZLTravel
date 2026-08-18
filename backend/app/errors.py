@@ -35,6 +35,27 @@ class DatabaseUnavailableError(AppError):
         super().__init__("database_unavailable", message, status_code=503)
 
 
+class CoordinationUnavailableError(AppError):
+    """Redis 协调能力不可用，不能安全执行需要跨 Worker 互斥的操作。"""
+
+    def __init__(self, message: str = "协调服务暂时不可用") -> None:
+        super().__init__("coordination_unavailable", message, status_code=503)
+
+
+class SessionBusyError(AppError):
+    """同一会话正在由另一个请求修改。"""
+
+    def __init__(self, message: str = "当前会话正在处理中，请稍后重试") -> None:
+        super().__init__("session_busy", message, status_code=503)
+
+
+class RateLimitExceededError(ProviderError):
+    """全局 Provider 并发槽已满。"""
+
+    def __init__(self, message: str = "外部服务当前繁忙，请稍后重试") -> None:
+        super().__init__("rate_limit_exceeded", message)
+
+
 class ResourceNotFoundError(AppError):
     """资源不存在，或不属于当前匿名访客。"""
 

@@ -1,17 +1,24 @@
 """持久规划会话运行时。
 
 本模块负责后台任务、幂等、恢复、步骤状态、重试和取消。它不解析供应商响应，也不计算
-行程规则；所有会话更新都先加进程内锁，再以完整快照写入 PostgreSQL，避免并行节点互相覆盖。
+行程规则；会话写锁和任务租约由 Redis 跨 Worker 协调，PostgreSQL 保存权威快照。
 """
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
-from app.errors import AppError, ResourceNotFoundError
+from app.coordination import Coordination, LocalCoordination
+from app.errors import (
+    AppError,
+    CoordinationUnavailableError,
+    ResourceNotFoundError,
+    SessionBusyError,
+)
 from app.models import (
     AccommodationPlan,
     HotelDetail,
@@ -52,15 +59,19 @@ class PlanningRuntime:
         workflow: WorkbenchWorkflow,
         rail: RailProvider,
         hotels: HotelProvider,
+        coordination: Coordination | None = None,
+        recovery_scan_seconds: int = 5,
     ) -> None:
         self.repository = repository
         self.travel_service = travel_service
         self.workflow = workflow
         self.rail = rail
         self.hotels = hotels
+        self.coordination = coordination or LocalCoordination()
+        self.recovery_scan_seconds = max(1, recovery_scan_seconds)
         self.tasks: dict[tuple[UUID, UUID], asyncio.Task[None]] = {}
         self._session_tasks: dict[tuple[UUID, UUID], set[asyncio.Task[None]]] = {}
-        self.locks: dict[tuple[UUID, UUID], asyncio.Lock] = {}
+        self._recovery_task: asyncio.Task[None] | None = None
 
     def start(
         self,
@@ -70,6 +81,12 @@ class PlanningRuntime:
     ) -> PlanningSession:
         """创建并调度发现任务；本方法不等待任何外部服务。"""
 
+        if idempotency_key:
+            cached_id = self.coordination.get_idempotency(visitor_id, idempotency_key)
+            if cached_id is not None:
+                cached = self.repository.get_session(cached_id, visitor_id)
+                if cached is not None:
+                    return cached
         now = _now()
         candidate = PlanningSession(
             session_id=uuid4(),
@@ -79,6 +96,8 @@ class PlanningRuntime:
             updated_at=now,
         )
         session = self.repository.create_session(candidate, idempotency_key, visitor_id)
+        if idempotency_key:
+            self.coordination.set_idempotency(visitor_id, idempotency_key, session.session_id)
         if session.session_id == candidate.session_id:
             self._schedule(
                 visitor_id,
@@ -98,7 +117,14 @@ class PlanningRuntime:
         return session
 
     async def recover(self) -> None:
-        """服务启动后恢复中断在查询或生成阶段的任务。"""
+        """立即扫描一次，并启动每五秒重复执行的任务接管循环。"""
+
+        await self._recover_once()
+        if self._recovery_task is None or self._recovery_task.done():
+            self._recovery_task = asyncio.create_task(self._recovery_loop())
+
+    async def _recover_once(self) -> None:
+        """把 PostgreSQL 中的可恢复任务交给 Redis 租约竞争。"""
 
         for visitor_id, session in self.repository.list_recoverable_sessions():
             session_id = session.session_id
@@ -115,6 +141,18 @@ class PlanningRuntime:
                     _task_factory(self._run_discovery, session_id, visitor_id),
                 )
 
+    async def _recovery_loop(self) -> None:
+        """持续发现崩溃 Worker 留下的任务，租约未过期时不会重复执行。"""
+
+        while True:
+            await asyncio.sleep(self.recovery_scan_seconds)
+            try:
+                await self._recover_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception("planning_recovery_scan_failed")
+
     async def update_selection(
         self,
         session_id: UUID,
@@ -128,7 +166,7 @@ class PlanningRuntime:
             raise AppError("invalid_session_state", "当前阶段不能修改选择", 409)
         _validate_selection(session, selection)
         quoted = await self._quote_selected_transfers(session, selection)
-        async with self._lock(session_id, visitor_id):
+        async with self.coordination.session_lock(session_id):
             current = self.get(session_id, visitor_id)
             if current.status not in {"awaiting_selection", "failed"}:
                 raise AppError("invalid_session_state", "当前阶段不能修改选择", 409)
@@ -185,7 +223,7 @@ class PlanningRuntime:
                 request.end_date,
             )
         options, _ = await self.rail.transfers(origin, destination, travel_date, direction)
-        async with self._lock(session_id, visitor_id):
+        async with self.coordination.session_lock(session_id):
             current = self.get(session_id, visitor_id)
             if current.status != "awaiting_selection":
                 raise AppError("invalid_session_state", "当前阶段不能查询中转车次", 409)
@@ -214,7 +252,7 @@ class PlanningRuntime:
     ) -> PlanningSession:
         """确认选择后调度确定性生成并立即返回会话。"""
 
-        async with self._lock(session_id, visitor_id):
+        async with self.coordination.session_lock(session_id):
             session = self.get(session_id, visitor_id)
             if session.status in {"generating", "completed"}:
                 return session
@@ -234,6 +272,7 @@ class PlanningRuntime:
             visitor_id,
             session_id,
             lambda: self._run_generation(session_id, visitor_id),
+            queue_if_busy=True,
         )
         return updated
 
@@ -242,7 +281,7 @@ class PlanningRuntime:
     ) -> PlanningSession:
         """重试失败会话；已有完整发现数据时只重跑生成。"""
 
-        async with self._lock(session_id, visitor_id):
+        async with self.coordination.session_lock(session_id):
             session = self.get(session_id, visitor_id)
             if session.status not in {"failed", "awaiting_selection"}:
                 raise AppError("invalid_session_state", "当前会话无需重试", 409)
@@ -262,12 +301,14 @@ class PlanningRuntime:
                 visitor_id,
                 session_id,
                 lambda: self._run_generation(session_id, visitor_id),
+                queue_if_busy=True,
             )
         else:
             self._schedule(
                 visitor_id,
                 session_id,
                 lambda: self._run_discovery(session_id, visitor_id),
+                queue_if_busy=True,
             )
         return updated
 
@@ -276,7 +317,7 @@ class PlanningRuntime:
     ) -> None:
         """取消未完成会话，并先持久化终态以阻止迟到任务覆盖。"""
 
-        async with self._lock(session_id, visitor_id):
+        async with self.coordination.session_lock(session_id):
             session = self.get(session_id, visitor_id)
             if session.status == "cancelled":
                 return
@@ -291,6 +332,10 @@ class PlanningRuntime:
     async def close(self) -> None:
         """停止并等待全部后台任务，为进程关闭释放运行时状态。"""
 
+        if self._recovery_task is not None:
+            self._recovery_task.cancel()
+            await asyncio.gather(self._recovery_task, return_exceptions=True)
+            self._recovery_task = None
         tasks = {
             task
             for session_tasks in self._session_tasks.values()
@@ -303,7 +348,6 @@ class PlanningRuntime:
             await asyncio.gather(*tasks, return_exceptions=True)
         self.tasks.clear()
         self._session_tasks.clear()
-        self.locks.clear()
 
     async def _run_discovery(self, session_id: UUID, visitor_id: UUID) -> None:
         try:
@@ -338,6 +382,10 @@ class PlanningRuntime:
             )
         except asyncio.CancelledError:
             return
+        except (CoordinationUnavailableError, SessionBusyError):
+            # 锁争用是可恢复的基础设施状态，不应把完整规划误标为业务失败。
+            LOGGER.warning("planning_discovery_paused session_id=%s", session_id)
+            return
         except Exception as error:
             await self._fail(session_id, visitor_id, error)
 
@@ -367,12 +415,15 @@ class PlanningRuntime:
             )
         except asyncio.CancelledError:
             return
+        except (CoordinationUnavailableError, SessionBusyError):
+            LOGGER.warning("planning_generation_paused session_id=%s", session_id)
+            return
         except Exception as error:
             await self._fail(session_id, visitor_id, error)
 
     def _step_callback(self, session_id: UUID, visitor_id: UUID) -> Callable[..., Any]:
         async def callback(name: str, status: str, **values: Any) -> None:
-            async with self._lock(session_id, visitor_id):
+            async with self.coordination.session_lock(session_id):
                 session = self.get(session_id, visitor_id)
                 steps = [_updated_step(item, name, status, values) for item in session.steps]
                 LOGGER.info(
@@ -393,7 +444,7 @@ class PlanningRuntime:
     async def _set_session(
         self, session_id: UUID, visitor_id: UUID, **values: Any
     ) -> PlanningSession:
-        async with self._lock(session_id, visitor_id):
+        async with self.coordination.session_lock(session_id):
             session = self.get(session_id, visitor_id)
             # 取消是终态。迟到的发现或生成任务只能结束，不能把会话重新推进。
             if session.status == "cancelled" and values.get("status") != "cancelled":
@@ -419,23 +470,21 @@ class PlanningRuntime:
         visitor_id: UUID,
         session_id: UUID,
         operation_factory: Callable[[], Coroutine[Any, Any, None]],
+        queue_if_busy: bool = False,
     ) -> None:
         key = (visitor_id, session_id)
         existing = self.tasks.get(key)
         if existing and not existing.done():
+            if not queue_if_busy:
+                return
 
             async def after_existing() -> None:
-                try:
-                    await asyncio.shield(existing)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    LOGGER.exception("planning_previous_task_failed session_id=%s", session_id)
-                await operation_factory()
+                await asyncio.gather(existing, return_exceptions=True)
+                await self._run_with_lease(session_id, operation_factory)
 
             task = asyncio.create_task(after_existing())
         else:
-            task = asyncio.create_task(operation_factory())
+            task = asyncio.create_task(self._run_with_lease(session_id, operation_factory))
         self.tasks[key] = task
         self._session_tasks.setdefault(key, set()).add(task)
         task.add_done_callback(
@@ -456,6 +505,39 @@ class PlanningRuntime:
                 self._session_tasks.pop(key, None)
         if self.tasks.get(key) is completed:
             self.tasks.pop(key, None)
+        if not completed.cancelled():
+            with contextlib.suppress(Exception):
+                completed.exception()
+
+    async def _run_with_lease(
+        self,
+        session_id: UUID,
+        operation_factory: Callable[[], Coroutine[Any, Any, None]],
+    ) -> None:
+        """只有租约持有者执行；续租丢失时取消任务并等待其他 Worker 接管。"""
+
+        try:
+            async with self.coordination.task_lease(session_id) as lease:
+                if lease is None:
+                    return
+                operation = asyncio.create_task(operation_factory())
+                lost = asyncio.create_task(lease.wait_lost())
+                try:
+                    done, _ = await asyncio.wait(
+                        {operation, lost}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if lost in done and not operation.done():
+                        LOGGER.warning("planning_task_lease_lost session_id=%s", session_id)
+                        # 租约已交给其他 Worker，旧 Worker 必须停止写入，避免覆盖新状态。
+                        return
+                    await operation
+                finally:
+                    for task in (operation, lost):
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(operation, lost, return_exceptions=True)
+        except CoordinationUnavailableError:
+            LOGGER.warning("planning_task_lease_unavailable session_id=%s", session_id)
 
     async def _cancel_session_tasks(self, session_id: UUID, visitor_id: UUID) -> None:
         """取消同一会话的任务链，避免前置任务在取消后覆盖最终状态。"""
@@ -469,9 +551,6 @@ class PlanningRuntime:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-
-    def _lock(self, session_id: UUID, visitor_id: UUID) -> asyncio.Lock:
-        return self.locks.setdefault((visitor_id, session_id), asyncio.Lock())
 
 
 def _task_factory(
