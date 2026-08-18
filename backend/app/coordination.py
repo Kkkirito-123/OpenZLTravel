@@ -352,6 +352,7 @@ class RedisCoordination:
     async def request_lock(self, namespace: str, key: str) -> AsyncIterator[None]:
         """同一缓存键只允许一个 Worker 回源，等待者取得锁后会再次检查缓存。"""
 
+        # 冷缓存并发命中时只允许一个 Worker 访问上游，避免同一请求同时消耗供应商配额。
         lock_key = f"travel:request:{namespace}:{_digest(key)}:lock"
         token = secrets.token_urlsafe(24)
         await self._acquire_lock(
@@ -389,6 +390,7 @@ class RedisCoordination:
     async def task_lease(self, session_id: UUID) -> AsyncIterator[LeaseHandle | None]:
         """租约确保同一后台会话在多个 Worker 中最多由一个执行。"""
 
+        # PostgreSQL 保存任务事实，Redis 租约只负责当前执行权；租约过期后其他 Worker 才能接管。
         client = self._require_async()
         key = f"travel:task:{session_id}:lease"
         token = secrets.token_urlsafe(24)

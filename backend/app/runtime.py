@@ -528,6 +528,7 @@ class PlanningRuntime:
                     )
                     if lost in done and not operation.done():
                         LOGGER.warning("planning_task_lease_lost session_id=%s", session_id)
+                        # 租约已交给其他 Worker，旧 Worker 必须停止写入，避免覆盖新状态。
                         return
                     await operation
                 finally:
