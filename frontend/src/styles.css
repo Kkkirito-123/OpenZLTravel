@@ -1,7 +1,9 @@
-/* 样式入口只定义加载顺序；具体页面样式按职责维护在 styles/ 目录。 */
 @import "./styles/base.css";
-@import "./styles/workbench.css";
-@import "./styles/trip.css";
-@import "./styles/history.css";
-@import "./styles/chat.css";
+@import "./styles/layout.css";
+@import "./styles/conversation.css";
+@import "./styles/progress.css";
+@import "./styles/interrupts.css";
+@import "./styles/selection.css";
+@import "./styles/itinerary.css";
+@import "./styles/drawer.css";
 @import "./styles/responsive.css";

@@ -1,434 +1,347 @@
-// 与后端响应一一对应的稳定类型；页面状态保留在各自 Vue 页面中。
-export interface TravelRequest {
-  destination: string;
-  start_date: string;
-  end_date: string;
-  travelers: number;
-  budget: number;
-  pace: "轻松" | "适中" | "紧凑";
-  hotel_level: "经济" | "舒适" | "品质";
-  transport_mode: "auto" | "walk" | "driving" | "transit" | "realtime_driving";
-  preferences: string[];
-  dietary_preferences: string[];
-  notes: string;
+/** TravelGraph 的公开阶段；阶段用于展示进度，前端不能据此自行决定下一节点。 */
+export type TravelPhase =
+  | "collecting"
+  | "discovering"
+  | "awaiting_selection"
+  | "planning"
+  | "reviewing"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+/** LangGraph SDK 返回的消息最小形状；content 保持 unknown，由展示层统一归一化。 */
+export interface TravelMessage {
+  id?: string;
+  role?: "user" | "assistant" | "human" | "ai" | "system" | "tool";
+  type?: string;
+  content: unknown;
 }
 
-export interface PlanningRequest extends TravelRequest {
-  origin: string;
+/** 当前 Thread 已收集的旅行需求；可选字段表示图仍可能处于 clarification 阶段。 */
+export interface TravelRequirements {
+  origin?: string | null;
+  destination?: string | null;
+  region?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
+  trip_days?: number | null;
+  travelers?: number;
+  budget?: number | null;
+  pace?: "轻松" | "适中" | "紧凑";
+  hotel_level?: "经济" | "舒适" | "品质";
+  transport_mode?: "auto" | "walk" | "driving" | "transit" | "realtime_driving";
+  preferences?: string[];
+  dietary_preferences?: string[];
 }
 
-export interface DataSource {
-  provider: "open_meteo" | "amap" | "local_estimate" | "osm" | "unknown";
-  freshness: "static" | "forecast" | "realtime" | "estimated";
-  fetched_at?: string | null;
+/** Catalog 或地图 Provider 确认的城市事实。 */
+export interface CityFact {
+  name: string;
+  adcode?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
 }
 
-export interface Coordinate {
-  latitude: number;
-  longitude: number;
+/** 保存行程时从 Provider 事实复制的地点快照，绝不使用 Planner 生成的名称。 */
+export interface PlaceSnapshot {
+  fact_id: string;
+  name: string;
+  address: string;
+  category: "attraction" | "restaurant" | "hotel";
+  latitude?: number | null;
+  longitude?: number | null;
+  image_url?: string | null;
 }
 
-export interface WeatherDay {
-  date: string;
-  day_weather: string | null;
-  night_weather: string | null;
-  day_temperature: string | null;
-  night_temperature: string | null;
-  warning: string | null;
-  source?: DataSource | null;
-}
-
-export interface Poi {
+/** 当前城市目录中的真实 POI；稳定 id 是 Planner 与前端展示之间的唯一引用键。 */
+export interface CatalogPlace {
   id: string;
   name: string;
   address: string;
   category: "attraction" | "restaurant" | "hotel";
   latitude: number;
   longitude: number;
-  type_name: string;
-  image_url: string | null;
+  image_url?: string | null;
 }
 
+/** 一个城市内按类别拆分的 Provider 候选池。 */
 export interface CandidateCatalog {
-  attractions: Poi[];
-  restaurants: Poi[];
-  hotels: Poi[];
+  attractions: CatalogPlace[];
+  restaurants: CatalogPlace[];
+  hotels: CatalogPlace[];
 }
 
-export interface SpotPlan {
-  poi_id: string;
-  name: string;
-  address: string;
-  latitude: number;
-  longitude: number;
-  start_time: string;
-  duration_minutes: number;
-  note: string;
-  image_url: string | null;
+/** 目的地推荐节点按确定性公式排序后公开的真实城市候选。 */
+export interface DestinationCandidate {
+  candidate_id: string;
+  city: CityFact;
+  score: number;
+  reasons: string[];
+  attraction_count?: number;
+  restaurant_count?: number;
+  hotel_count?: number;
 }
 
-export interface MealPlan {
-  poi_id: string;
-  name: string;
-  address: string;
-  latitude: number;
-  longitude: number;
-  meal_type: string;
-  image_url: string | null;
-}
-
-export interface HotelPlan {
-  poi_id: string;
-  name: string;
-  address: string;
-  latitude: number;
-  longitude: number;
-  level: string;
-  image_url: string | null;
-}
-
-export interface RouteSegment {
-  from_poi_id: string;
-  to_poi_id: string;
-  distance_km: number;
-  duration_minutes: number;
-  mode: string;
-  polyline: Coordinate[];
-  source?: DataSource | null;
-  transit_lines?: TransitLine[];
-  via_poi_ids?: string[];
-}
-
-export interface TransitLine {
-  name: string;
-  type: string;
-  departure_stop: string;
-  arrival_stop: string;
-  via_stops: string[];
-}
-
-export interface DayPlan {
-  day_index: number;
-  date: string;
-  theme: string;
-  activities: SpotPlan[];
-  meals: MealPlan[];
-  hotel: HotelPlan | null;
-  routes: RouteSegment[];
-  weather: WeatherDay;
-  budget: BudgetBreakdown | null;
-  notes: string[];
-}
-
-export interface BudgetBreakdown {
-  transport: number;
-  local_transport?: number | null;
-  intercity_transport?: number | null;
-  hotel: number;
-  meals: number;
-  tickets: number;
-  other: number;
-  total: number;
-}
-
+/** 车次席别的真实可用性与报价；缺价时保持 null，前端显示“待确认”。 */
 export interface RailSeat {
   name: string;
-  availability: string;
-  price: number | null;
+  availability?: string;
+  price?: number | null;
 }
 
-export interface RailSegment {
-  train_code: string;
-  from_station: string;
-  to_station: string;
-  departure_time: string;
-  arrival_time: string;
-  duration_minutes: number;
-  seats: RailSeat[];
-}
-
-export type RailDirection = "outbound" | "return";
-
+/** 12306 Provider 返回的稳定车次事实，option_id 用于 interrupt resume。 */
 export interface RailOption {
   option_id: string;
-  direction: RailDirection;
-  travel_date: string;
+  direction: "outbound" | "return";
+  travel_date?: string;
   train_code: string;
-  train_type: string;
   from_station: string;
   to_station: string;
   departure_time: string;
   arrival_time: string;
-  duration_minutes: number;
-  seats: RailSeat[];
-  price_from: number | null;
-  has_ticket: boolean;
-  is_transfer: boolean;
-  transfer_station: string | null;
-  segments: RailSegment[];
-  booking_url: string;
+  duration_minutes?: number;
+  seats?: RailSeat[];
+  price_from?: number | null;
+  has_ticket?: boolean;
+  is_transfer?: boolean;
+  transfer_station?: string | null;
+  booking_url?: string;
 }
 
+/** RollingGo 或目录降级返回的酒店事实，hotel_id 用于 interrupt resume。 */
+export interface HotelOption {
+  hotel_id: string;
+  name: string;
+  address?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  star_rating?: number | null;
+  price_per_night?: number | null;
+  total_price?: number | null;
+  distance_km?: number | null;
+  image_url?: string | null;
+  facilities?: string[];
+  source?: "rollinggo" | "osm" | "amap" | "unknown";
+  booking_url?: string | null;
+}
+
+/** 某天的天气事实；Provider 无法确认的字段保持 null，不使用经验值补齐。 */
+export interface WeatherDay {
+  date: string;
+  day_weather?: string | null;
+  night_weather?: string | null;
+  day_temperature?: string | null;
+  night_temperature?: string | null;
+  warning?: string | null;
+  source?: string | null;
+}
+
+/**
+ * 图中全部 Provider 事实的前端投影。
+ * 这些字段只读；组件只能展示或回传稳定 ID，不能把修改后的对象写回 Graph。
+ */
+export interface TravelFacts {
+  city?: CityFact | null;
+  catalog?: CandidateCatalog | null;
+  outbound_options?: RailOption[];
+  return_options?: RailOption[];
+  hotel_options?: HotelOption[];
+  weather?: WeatherDay[];
+  routes?: Record<string, unknown[]>;
+}
+
+/** 用户选择的一趟车次及可选席别。 */
 export interface RailChoice {
   option_id: string;
   seat_type?: string | null;
 }
 
-export interface HotelOption {
-  hotel_id: string;
-  name: string;
-  address: string;
-  latitude: number | null;
-  longitude: number | null;
-  star_rating: number | null;
-  price_per_night: number | null;
-  total_price: number | null;
-  distance_km: number | null;
-  image_url: string | null;
-  facilities: string[];
-  source: "rollinggo" | "dida" | "osm";
-  booking_url: string | null;
+/** travel_selection 恢复后的结构化选择；事实 ID 与自行安排标志互斥关系由后端校验。 */
+export interface TravelSelection {
+  outbound?: RailChoice | null;
+  return_trip?: RailChoice | null;
+  hotel_id?: string | null;
+  self_arranged_outbound?: boolean;
+  self_arranged_return?: boolean;
+  self_arranged_hotel?: boolean;
 }
 
-export interface HotelRoom {
-  room_id: string;
-  name: string;
-  price: number | null;
-  breakfast: string | null;
-  cancellation: string | null;
-  available: boolean;
-}
-
-export interface HotelDetail {
-  hotel_id: string;
-  name: string;
-  address: string;
-  description: string;
-  facilities: string[];
-  images: string[];
-  rooms: HotelRoom[];
-  booking_url: string | null;
-  source: "rollinggo" | "dida" | "osm";
-}
-
-export interface PlanningSelection {
-  outbound: RailChoice | null;
-  return_trip: RailChoice | null;
-  hotel_id: string | null;
-  self_arranged_outbound: boolean;
-  self_arranged_return: boolean;
-  self_arranged_hotel: boolean;
-}
-
-export interface IntercityPlan {
-  outbound: RailOption | null;
-  return_trip: RailOption | null;
-  self_arranged_outbound: boolean;
-  self_arranged_return: boolean;
-}
-
-export interface AccommodationPlan {
-  hotel: HotelOption | null;
-  check_in: string;
-  check_out: string;
-  nights: number;
-  self_arranged: boolean;
-}
-
-export type PlanningStatus =
-  | "searching"
-  | "awaiting_selection"
-  | "generating"
-  | "completed"
-  | "failed"
-  | "cancelled";
-
-export type StepStatus = "pending" | "running" | "completed" | "degraded" | "failed" | "cancelled";
-
-export interface PlanningStep {
-  name: string;
-  label: string;
-  status: StepStatus;
-  attempts: number;
-  duration_ms: number | null;
-  cache_hit: boolean;
-  message: string | null;
-  error_code: string | null;
-}
-
-export interface PlanningSession {
-  session_id: string;
-  status: PlanningStatus;
-  request: PlanningRequest;
-  steps: PlanningStep[];
-  outbound_options: RailOption[];
-  return_options: RailOption[];
-  outbound_transfers: RailOption[];
-  return_transfers: RailOption[];
-  hotel_options: HotelOption[];
-  weather: WeatherDay[];
-  candidates: CandidateCatalog | null;
-  selection: PlanningSelection;
-  trip_id: string | null;
-  warnings: string[];
-  error_code: string | null;
-  error_message: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface Itinerary {
-  trip_id: string;
-  planning_session_id?: string | null;
-  revision?: number;
-  destination: string;
-  start_date: string;
-  end_date: string;
-  travelers: number;
-  summary: string;
-  days: DayPlan[];
-  budget: BudgetBreakdown;
-  intercity?: IntercityPlan | null;
-  accommodation?: AccommodationPlan | null;
-  tips: string[];
-  warnings: string[];
-  created_at: string;
-}
-
-export interface TripSummary {
-  trip_id: string;
-  destination: string;
-  start_date: string;
-  end_date: string;
-  summary: string;
-  created_at: string;
-}
-
-export interface DayActivityEdit {
+/** Planner 草稿中的单项活动，只携带 POI ID，名称和地址统一从 place_index 水合。 */
+export interface ActivityDraft {
   poi_id: string;
   start_time: string;
   duration_minutes: number;
+  note?: string;
 }
 
-export interface DayEditRequest {
-  expected_revision: number;
-  activities: DayActivityEdit[];
+/** Planner 草稿中的一天；餐饮和住宿同样只引用当前事实集合中的稳定 ID。 */
+export interface DayDraft {
+  day_index: number;
+  theme: string;
+  activities: ActivityDraft[];
+  meal_ids?: string[];
+  hotel_id?: string | null;
+  notes?: string[];
 }
 
-export interface TripAlternatives {
+/** PlannerAgent 的结构化草稿；在展示前已经过最终事实边界与日期结构校验。 */
+export interface ItineraryDraft {
+  summary: string;
+  days: DayDraft[];
+  tips?: string[];
+}
+
+/** 确定性预算节点的结果；只有 total_known 计入已经确认或明确标注的金额。 */
+export interface BudgetBreakdown {
+  intercity_transport?: number | null;
+  local_transport?: number | null;
+  hotel?: number | null;
+  meals_estimated?: number;
+  tickets_estimated?: number;
+  total_known?: number;
+  currency?: "CNY";
+}
+
+/** 最终校验后写入 `(user_id, "trips")` 的完整 Store 记录。 */
+export interface TripRecord {
   trip_id: string;
-  revision: number;
-  attractions: Poi[];
+  user_id?: string;
+  requirements: TravelRequirements;
+  city?: CityFact;
+  selection?: TravelSelection;
+  draft: ItineraryDraft;
+  weather?: WeatherDay[];
+  routes?: Record<string, unknown[]>;
+  budget?: BudgetBreakdown;
+  place_index?: Record<string, PlaceSnapshot>;
+  warnings?: string[];
+  created_at?: string;
 }
 
-export interface ApiError {
-  error?: { code?: string; message?: string };
+/** 可跨 Checkpoint 稳定展示的告警或错误，不直接传输异常对象。 */
+export interface GraphNotice {
+  code: string;
+  message: string;
+  node: string;
 }
 
-export type AssistantFlow = "destination_discovery" | "trip_planning";
-export type AssistantSkillId = AssistantFlow;
-export type MemorySlotName =
-  | "origin"
-  | "preferences"
-  | "dietary_preferences"
-  | "pace"
-  | "hotel_level"
-  | "transport_mode";
-export type AssistantStatus =
-  | "collecting"
-  | "recommendation_ready"
-  | "planning_started"
-  | "closed";
-
-export interface TravelDialogueSlots {
-  origin: string | null;
-  destination_region: string | null;
-  destination_city: string | null;
-  start_date: string | null;
-  end_date: string | null;
-  days: number | null;
-  budget: number | null;
-  travelers: number;
-  preferences: string[];
-  dietary_preferences: string[];
-  distance_preference: "near" | "far" | null;
-  pace: "轻松" | "适中" | "紧凑";
-  hotel_level: "经济" | "舒适" | "品质";
-  transport_mode: TravelRequest["transport_mode"];
-  notes: string;
+/**
+ * 前端读取的唯一权威执行状态。
+ * 本地只保留 Thread ID、Run 游标和乐观消息；需求、事实、草稿与阶段始终以该快照为准。
+ */
+export interface TravelState {
+  messages: TravelMessage[];
+  phase: TravelPhase;
+  requirements: TravelRequirements;
+  destination_candidates: DestinationCandidate[];
+  facts: TravelFacts;
+  selection: TravelSelection;
+  draft?: ItineraryDraft | null;
+  review?: unknown;
+  budget?: BudgetBreakdown | null;
+  trip_id?: string | null;
+  warnings: GraphNotice[];
+  errors: GraphNotice[];
+  revision_count: number;
 }
 
-export interface SlotMetadata {
-  source: "user_explicit" | "deterministic" | "memory" | "default";
-  updated_turn: number;
+/** 无效 resume 时随同类 interrupt 返回的稳定错误，收到它不代表图已推进。 */
+export interface InterruptError {
+  code: string;
+  message: string;
 }
 
-export interface AssistantSkillView {
-  id: AssistantSkillId;
-  title: string;
-  description: string;
-  required_slots: string[];
-  effect: "collect_requirements" | "start_planning";
+/**
+ * 需求字段不完整时的公开中断。
+ * 前端必须把用户输入转换成 RequirementPatch，不能把自然语言字符串直接作为 resume。
+ */
+export interface ClarificationInterrupt {
+  kind: "clarification";
+  question: string;
+  missing_fields: string[];
+  error?: InterruptError | null;
 }
 
-export interface AssistantTokenUsage {
-  model_calls: number;
-  input_tokens: number;
-  output_tokens: number;
-  cached_input_tokens: number;
-  total_tokens: number;
+/**
+ * 未指定具体城市时的公开中断。
+ * candidates 全部来自 Catalog 的确定性评分，恢复时只能回传其中的 candidate_id。
+ */
+export interface DestinationSelectionInterrupt {
+  kind: "destination_selection";
+  candidates: DestinationCandidate[];
+  error?: InterruptError | null;
 }
 
-export interface TravelMemory {
-  key: MemorySlotName;
-  value: string | string[];
-  version: number;
-  source_session_id: string;
-  created_at: string;
-  updated_at: string;
+/**
+ * Provider 事实准备完成后的公开中断。
+ * 车票、酒店与价格均为只读事实；前端只提交稳定 ID 或明确的自行安排标记。
+ */
+export interface TravelSelectionInterrupt {
+  kind: "travel_selection";
+  outbound_options: RailOption[];
+  return_options: RailOption[];
+  hotel_options: HotelOption[];
+  requires_hotel: boolean;
+  self_arranged_allowed: boolean;
+  error?: InterruptError | null;
 }
 
-export interface TravelDialogueState {
-  session_id: string;
-  revision: number;
-  status: AssistantStatus;
-  active_flow: AssistantFlow | null;
-  slots: TravelDialogueSlots;
-  slot_metadata: Record<string, SlotMetadata>;
-  pending_slots: string[];
-  last_question: string | null;
-  planning_session_id: string | null;
-  token_usage: AssistantTokenUsage;
-  created_at: string;
-  updated_at: string;
+export type TravelInterrupt =
+  | ClarificationInterrupt
+  | DestinationSelectionInterrupt
+  | TravelSelectionInterrupt;
+
+/** 与三类 interrupt 一一对应的 Command(resume=...) 载荷，kind 不匹配时不得推进图。 */
+export type ResumePayload =
+  | { kind: "clarification"; values: Partial<TravelRequirements> }
+  | { kind: "destination_selection"; candidate_id: string }
+  | { kind: "travel_selection"; selection: TravelSelection };
+
+/** 一次 Thread 状态读取结果，合并 Checkpoint values 与当前任务中的 interrupt。 */
+export interface ThreadSnapshot {
+  state: TravelState;
+  interrupt: TravelInterrupt | null;
+  status: "idle" | "busy" | "interrupted" | "error";
 }
 
-export interface AssistantConversationTurn {
-  sequence: number;
-  user_content: string;
-  assistant_content: string;
-  created_at: string;
+/** 历史抽屉使用的轻量行程摘要，完整详情需要按 trip_id 单独读取。 */
+export interface TripSummary {
+  trip_id: string;
+  destination: string;
+  start_date?: string | null;
+  end_date?: string | null;
+  summary?: string;
+  created_at?: string;
 }
 
-export interface AssistantMessageRequest {
-  message_id: string;
-  content: string;
-}
+/**
+ * 新建 Thread 或远端数据暂不可用时的状态模板。
+ *
+ * 这个常量只描述字段默认值；调用方应使用 ``createEmptyTravelState`` 获取独立数组，
+ * 避免多个 Thread 共享同一个 messages、warnings 或 errors 引用。
+ */
+export const EMPTY_TRAVEL_STATE: TravelState = {
+  messages: [],
+  phase: "collecting",
+  requirements: {},
+  destination_candidates: [],
+  facts: {},
+  selection: {},
+  warnings: [],
+  errors: [],
+  revision_count: 0,
+};
 
-export interface AssistantTurnResponse {
-  message_id: string;
-  reply: string;
-  state: TravelDialogueState;
-  missing_slots: string[];
-  planning_session_id: string | null;
-  skill: AssistantSkillView | null;
-  command_source: "fast_parser" | "intent_cache" | "llm";
-  context_tokens: number;
-}
-
-export interface AssistantSessionView {
-  state: TravelDialogueState;
-  turns: AssistantConversationTurn[];
-  skill: AssistantSkillView | null;
-  memories: TravelMemory[];
+/** 创建一份不会与其他 Thread 共享可变数组的初始状态。 */
+export function createEmptyTravelState(): TravelState {
+  return {
+    ...EMPTY_TRAVEL_STATE,
+    messages: [],
+    requirements: {},
+    destination_candidates: [],
+    facts: {},
+    selection: {},
+    warnings: [],
+    errors: [],
+  };
 }

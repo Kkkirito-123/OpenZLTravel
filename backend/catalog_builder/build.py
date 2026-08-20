@@ -234,6 +234,8 @@ class CatalogBuilder:
         missing_geometry = 0
 
         def rows() -> Iterator[tuple[Any, ...]]:
+            """流式转换边界记录，同时累计可审计的无效与缺失几何统计。"""
+
             nonlocal invalid, missing_geometry
             for record in iter_boundaries(self.paths.areaboundaries):
                 invalid += int(record.error is not None)
@@ -399,7 +401,7 @@ def main() -> None:
     try:
         import psycopg
     except ImportError as error:
-        raise SystemExit("缺少 psycopg，请先安装 requirements-data.txt") from error
+        raise SystemExit("缺少 psycopg，请先执行：python -m pip install -e '.[catalog]'") from error
     with psycopg.connect(database_url) as connection:
         stats = CatalogBuilder(connection, paths).run()
     print_stats(stats)

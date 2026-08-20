@@ -1,0 +1,90 @@
+name: openzltravel
+
+services:
+  catalogdb:
+    image: postgis/postgis:16-3.4
+    container_name: openzltravelcatalog
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: openzltravelcatalog
+      POSTGRES_USER: catalogowner
+      POSTGRES_PASSWORD: ${CATALOG_POSTGRES_PASSWORD:?backend/.env.catalog.local 缺少 CATALOG_POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C.UTF-8
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      # 固定 volume 名称，直接复用旧 Catalog 数据，重建应用镜像不会丢数据。
+      - openzltravelcatalogdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U catalogowner -d openzltravelcatalog"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  agent:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: openzltravelagent
+    restart: unless-stopped
+    init: true
+    env_file:
+      # 模型、高德和 RollingGo 密钥只从这个本机文件注入。
+      - ./backend/.env
+    environment:
+      # Docker 内的 Vite 代理不是 loopback 客户端，因此使用已有的签名 Cookie 边界。
+      # 默认密钥只用于端口绑定在 127.0.0.1 的本地 Docker 开发环境。
+      AUTH_MODE: signed
+      # 与原本 dev 模式的本地默认值一致，切换 Docker 后旧开发 Cookie 仍可验证。
+      AUTH_SECRET: ${AUTH_SECRET:-openzltravel-local-development-secret-only}
+      PROVIDER_MODE: ${PROVIDER_MODE:-live}
+      RAIL_PROVIDER: ${RAIL_PROVIDER:-public}
+      # 应用容器使用只读 travelapp；PostgreSQL conninfo 避免 URL 特殊字符转义问题。
+      CATALOG_DATABASE_URL: "host=catalogdb port=5432 dbname=openzltravelcatalog user=travelapp password='${TRAVELAPP_POSTGRES_PASSWORD:?backend/.env.catalog.local 缺少 TRAVELAPP_POSTGRES_PASSWORD}'"
+      PYTHONUTF8: "1"
+      LANGGRAPH_STRICT_MSGPACK: "true"
+    depends_on:
+      catalogdb:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:2024:2024"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2024/ok', timeout=3)"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: openzltravelfrontend
+    restart: unless-stopped
+    init: true
+    environment:
+      # 该地址只由 Vite 服务端代理使用，浏览器仍访问 127.0.0.1:5173。
+      VITE_AGENT_SERVER_TARGET: http://agent:2024
+    depends_on:
+      agent:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:5173:5173"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:5173/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  openzltravelcatalogdata:
+    name: openzltravelcatalogdata

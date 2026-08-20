@@ -1,0 +1,163 @@
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  justify-content: flex-end;
+  background: var(--scrim);
+}
+
+.history-drawer {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 12px;
+  width: min(440px, 100%);
+  height: 100dvh;
+  padding: 18px;
+  overflow: hidden;
+  background: var(--paper);
+  box-shadow: -16px 0 40px rgb(8 18 13 / 22%);
+}
+
+.drawer-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.drawer-heading h2 {
+  margin: 0;
+}
+
+.drawer-new-button {
+  width: 100%;
+}
+
+.drawer-loading,
+.drawer-empty {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 9px;
+  min-height: 220px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.drawer-loading {
+  grid-auto-flow: column;
+}
+
+.drawer-empty p {
+  max-width: 280px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.history-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 0;
+  margin: 0 -4px 0 0;
+  padding: 0 4px 24px 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.history-list li {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  gap: 6px;
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.history-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  min-height: 80px;
+  padding: 6px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+}
+
+.history-main span,
+.history-main small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.history-main p {
+  display: -webkit-box;
+  margin: 2px 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.history-delete {
+  align-self: start;
+  color: var(--danger);
+}
+
+.delete-confirm {
+  position: absolute;
+  inset: 7px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-radius: 4px;
+}
+
+.delete-confirm span {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.delete-confirm button {
+  min-height: 44px;
+  padding: 0 10px;
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+}
+
+.delete-confirm .danger-text {
+  color: #ffffff;
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+.drawer-enter-active,
+.drawer-leave-active {
+  transition: opacity var(--motion-normal) ease;
+}
+
+.drawer-enter-active .history-drawer,
+.drawer-leave-active .history-drawer {
+  transition: transform var(--motion-normal) ease-out;
+}
+
+.drawer-enter-from,
+.drawer-leave-to {
+  opacity: 0;
+}
+
+.drawer-enter-from .history-drawer,
+.drawer-leave-to .history-drawer {
+  transform: translateX(100%);
+}
