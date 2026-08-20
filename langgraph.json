@@ -1,0 +1,40 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": [
+    "./backend"
+  ],
+  "graphs": {
+    "travel": "./backend/src/travel_graph/application.py:travel"
+  },
+  "auth": {
+    "path": "./backend/src/api/auth.py:auth",
+    "disable_studio_auth": true
+  },
+  "checkpointer": {
+    "backend": "custom",
+    "path": "./backend/src/travel_graph/checkpoint.py:create_checkpointer"
+  },
+  "http": {
+    "app": "./backend/src/api/web.py:app",
+    "enable_custom_route_auth": true,
+    "disable_store": true,
+    "disable_webhooks": true,
+    "cors": {
+      "allow_origins": [
+        "http://127.0.0.1:5173",
+        "http://localhost:5173"
+      ],
+      "allow_methods": [
+        "GET",
+        "POST",
+        "DELETE",
+        "OPTIONS"
+      ],
+      "allow_headers": [
+        "Content-Type",
+        "Last-Event-ID"
+      ],
+      "allow_credentials": true
+    }
+  }
+}

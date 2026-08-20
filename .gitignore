@@ -1,17 +1,14 @@
-# Local documentation
-# The docs folder is kept for local learning notes and will not be uploaded.
-docs/
-
-# Environment files
+# 本机环境与密钥
 .env
 .env.local
 .env.*.local
 backend/.env
 frontend/.env
 
-# Python cache and virtual environments
+# Python 缓存、检查产物和虚拟环境
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -22,8 +19,9 @@ htmlcov/
 venv/
 env/
 .python-version
+.langgraph_api/
 
-# Backend runtime data
+# 本机运行数据；不得读取、输出或提交
 /db/
 backend/db/
 backend/**/*.db
@@ -31,36 +29,25 @@ backend/**/*.db-journal
 backend/**/*.sqlite
 backend/**/*.sqlite3
 
-# Offline public data and generated catalog
+# 独立地点目录的公开原始数据与临时构建文件
 backend/data/raw/
-backend/data/catalog.sqlite3
-backend/data/*-test.sqlite3
-backend/data/amap-cache.json
-backend/data/amap-cache.json.tmp
+backend/data/tmp/
 
-# Frontend dependencies and build output
+# 前端依赖与构建结果
 node_modules/
 frontend/node_modules/
 frontend/.vite/
 dist/
 frontend/dist/
 
-# Local concurrency experiment outputs
-loadtests/results/
-
-# Logs
+# 日志
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# Exported local files
-*.pdf
-*.docx
-*.xlsx
-
-# OS / editor files
+# 编辑器和系统文件
 .DS_Store
 Thumbs.db
 .idea/

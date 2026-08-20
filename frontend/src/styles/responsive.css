@@ -1,286 +1,295 @@
-@media (max-width: 960px) {
-  .chat-layout {
-    grid-template-columns: minmax(0, 1fr) 248px;
+@media (max-width: 1000px) {
+  .workbench-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .progress-strip {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .progress-panel {
+    position: static;
   }
 
-  .step-status:nth-child(3) {
-    border-right: 0;
+  .phase-list {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 4px;
   }
 
-  .step-status:nth-child(n + 4) {
-    border-top: 1px solid var(--line);
+  .phase-list li {
+    display: grid;
+    justify-items: center;
+    align-content: start;
+    gap: 5px;
+    min-height: 60px;
+    text-align: center;
   }
 
-  .journey-strip {
-    grid-template-columns: 1fr;
+  .phase-list li::after {
+    top: 14px;
+    right: -12px;
+    bottom: auto;
+    left: calc(50% + 16px);
+    width: calc(100% - 24px);
+    height: 1px;
   }
 
-  .journey-strip article {
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-  }
-
-  .journey-strip article:last-child {
-    border-bottom: 0;
-  }
-
-  .result-layout {
-    grid-template-columns: 1fr;
-  }
-
-  .result-sidebar {
+  .requirement-summary dl {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
-@media (max-width: 720px) {
-  body {
-    font-size: 16px;
+@media (max-width: 760px) {
+  .workbench-topbar {
+    padding: 0 16px;
   }
 
-  h1 {
-    font-size: 28px;
+  .workbench-main {
+    padding: 24px 16px 56px;
   }
 
-  .topbar {
-    padding: 0 14px;
+  .thread-label {
+    display: none;
+  }
+
+  .conversation-panel {
+    min-height: 520px;
+  }
+
+  .message-list {
+    max-height: 380px;
+    padding: 18px;
+  }
+
+  .destination-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rail-option > label {
+    grid-template-columns: 22px 58px minmax(0, 1fr) auto;
+    row-gap: 5px;
+  }
+
+  .rail-times { grid-column: 3; }
+  .rail-stations { grid-column: 3; }
+  .rail-meta { grid-column: 4; grid-row: 2; }
+  .rail-price { grid-column: 4; grid-row: 1; }
+
+  .rail-option > select {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .hotel-option {
+    grid-template-columns: 20px 88px minmax(0, 1fr);
+  }
+
+  .hotel-image {
+    width: 88px;
+    height: 72px;
+  }
+
+  .hotel-price {
+    grid-column: 3;
+    justify-items: start;
+  }
+
+  .budget-panel dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .workbench-topbar {
+    min-height: 64px;
+    padding: 0 12px;
+  }
+
+  .brand {
+    gap: 8px;
   }
 
   .brand small {
     display: none;
   }
 
-  .nav-links a {
-    padding: 0 8px;
+  .brand-mark {
+    width: 34px;
+    height: 34px;
+  }
+
+  .topbar-actions {
+    gap: 6px;
+  }
+
+  .topbar-actions .secondary-button {
+    padding-inline: 9px;
+    font-size: 12px;
+  }
+
+  .workbench-main {
+    gap: 16px;
+    padding: 20px 12px 48px;
+  }
+
+  .workspace-heading p:last-child {
     font-size: 13px;
   }
 
-  .page-content {
-    padding: 24px 14px 56px;
-  }
-
-  .chat-heading {
+  .global-alert {
     align-items: flex-start;
-    flex-direction: column;
-    gap: 12px;
+    flex-wrap: wrap;
   }
 
-  .chat-layout {
-    grid-template-columns: 1fr;
+  .global-alert > span {
+    flex-basis: calc(100% - 38px);
+  }
+
+  .global-alert .secondary-button {
+    width: 100%;
+  }
+
+  .panel-heading {
+    align-items: flex-start;
+    min-height: 76px;
+    padding: 13px 14px;
+  }
+
+  .live-status {
+    padding-inline: 8px;
+    font-size: 11px;
   }
 
   .conversation-panel {
-    grid-template-rows: minmax(240px, 1fr) auto auto;
-    min-height: calc(100dvh - 270px);
+    min-height: 500px;
   }
 
-  .chat-messages {
-    max-height: calc(100dvh - 380px);
-    padding: 18px 14px;
+  .message-list {
+    max-height: 360px;
+    padding: 15px 12px;
+  }
+
+  .message-avatar {
+    flex-basis: 30px;
+    width: 30px;
+    height: 30px;
   }
 
   .message-bubble {
-    max-width: 86%;
+    max-width: calc(100% - 42px);
   }
 
-  .chat-composer {
+  .composer {
     padding: 12px;
   }
 
-  .composer-actions .primary-button {
-    min-width: 112px;
+  .phase-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    row-gap: 10px;
   }
 
-  .requirements-panel {
-    padding: 16px 14px;
+  .phase-list li:nth-child(3)::after,
+  .phase-list li:last-child::after {
+    display: none;
   }
 
-  .chat-error {
-    align-items: flex-start;
+  .requirement-summary dl {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .workspace-heading,
-  .result-header,
-  .result-heading,
-  .day-heading {
-    align-items: flex-start;
-    flex-direction: column;
+  .interrupt-card > header,
+  .selection-group-heading,
+  .rail-option-list,
+  .hotel-option-list,
+  .destination-grid {
+    padding-right: 12px;
+    padding-left: 12px;
   }
 
-  .stepper {
+  .clarification-card > form > .primary-button {
+    justify-self: stretch;
     width: 100%;
   }
 
-  .stepper li {
-    flex: 1;
-    justify-content: center;
-    padding: 0 4px;
-  }
-
-  .two-columns,
-  .three-columns,
-  .result-sidebar {
-    grid-template-columns: 1fr;
-  }
-
-  .form-section {
-    padding: 18px 14px;
-  }
-
-  .form-footer,
-  .selection-footer {
+  .interrupt-footer {
     align-items: stretch;
     flex-direction: column;
+    padding: 12px;
+  }
+
+  .interrupt-footer .primary-button {
+    width: 100%;
+  }
+
+  .rail-option > label {
+    grid-template-columns: 22px 54px minmax(0, 1fr);
+  }
+
+  .rail-times,
+  .rail-stations {
+    grid-column: 3;
+  }
+
+  .rail-meta,
+  .rail-price {
+    grid-column: 3;
+    grid-row: auto;
+    justify-self: start;
+  }
+
+  .hotel-option {
+    grid-template-columns: 20px minmax(0, 1fr);
+  }
+
+  .hotel-image {
+    grid-column: 2;
+    width: 100%;
+    height: 128px;
+  }
+
+  .hotel-copy,
+  .hotel-price {
+    grid-column: 2;
+  }
+
+  .day-card,
+  .itinerary-header,
+  .budget-panel,
+  .tips-panel {
+    padding: 16px 14px;
+  }
+
+  .day-heading {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+
+  .day-weather {
+    grid-column: 2;
+  }
+
+  .activity-list li {
+    grid-template-columns: 48px 14px minmax(0, 1fr);
+  }
+
+  .budget-panel dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .history-drawer {
+    width: 100%;
     padding: 14px;
   }
-
-  .form-footer .primary-button,
-  .selection-footer .primary-button {
-    width: 100%;
-  }
-
-  .progress-strip {
-    grid-template-columns: 1fr;
-  }
-
-  .step-status,
-  .step-status:nth-child(3) {
-    border-top: 1px solid var(--line);
-    border-right: 0;
-  }
-
-  .step-status:first-child {
-    border-top: 0;
-  }
-
-  .section-toolbar {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .segmented-control {
-    width: 100%;
-  }
-
-  .filter-bar select {
-    flex: 1 1 140px;
-  }
-
-  .hotel-row {
-    grid-template-columns: 84px minmax(0, 1fr);
-    gap: 12px;
-  }
-
-  .hotel-thumb {
-    width: 84px;
-    height: 84px;
-  }
-
-  .hotel-price {
-    grid-column: 1 / -1;
-    align-items: flex-start;
-    padding-top: 10px;
-    border-top: 1px solid var(--line);
-  }
-
-  .hotel-price > div {
-    width: 100%;
-  }
-
-  .hotel-price .select-button {
-    flex: 1;
-  }
-
-  .day-panel {
-    padding: 16px 14px;
-  }
-
-  .day-actions,
-  .header-actions {
-    width: 100%;
-  }
-
-  .day-actions > *,
-  .header-actions > * {
-    flex: 1;
-  }
-
-  .timeline-item {
-    grid-template-columns: 44px minmax(0, 1fr);
-  }
-
-  .place-row {
-    grid-template-columns: 1fr;
-  }
-
-  .spot-image {
-    width: 100%;
-    height: 160px;
-  }
-
-  .trip-map {
-    height: 220px;
-  }
-
-  .detail-drawer {
-    width: 100%;
-    padding: 24px 16px;
-  }
-
-  .edit-row {
-    grid-template-columns: 44px minmax(0, 1fr);
-  }
-
-  .edit-fields {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .edit-fields label:first-child {
-    grid-column: 1 / -1;
-  }
-
-  .edit-actions {
-    grid-column: 1 / -1;
-    grid-template-columns: repeat(3, 44px);
-    justify-content: end;
-  }
 }
 
-@media (max-width: 420px) {
-  .topbar {
-    flex-wrap: wrap;
-    gap: 4px;
-    padding: 8px 10px 0;
+@media (max-width: 390px) {
+  .brand strong {
+    font-size: 14px;
   }
 
-  .brand {
-    min-height: 44px;
+  .topbar-actions .secondary-button {
+    width: 44px;
+    padding: 0;
+    font-size: 0;
   }
 
-  .nav-links {
-    width: 100%;
-    border-top: 1px solid var(--line);
-  }
-
-  .nav-links a {
-    flex: 1;
-    justify-content: center;
-    min-width: 0;
-    padding: 0 4px;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    scroll-behavior: auto !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+  .topbar-actions .secondary-button svg {
+    width: 18px;
+    height: 18px;
   }
 }

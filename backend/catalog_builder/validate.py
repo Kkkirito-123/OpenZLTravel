@@ -262,7 +262,7 @@ def main() -> None:
     try:
         import psycopg
     except ImportError as error:
-        raise SystemExit("缺少 psycopg，请先安装 requirements-data.txt") from error
+        raise SystemExit("缺少 psycopg，请先执行：python -m pip install -e '.[catalog]'") from error
     with psycopg.connect(database_url) as connection:
         if arguments.command == "verify":
             print_stats(validate_catalog(connection, require_full=True))

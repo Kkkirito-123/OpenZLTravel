@@ -347,7 +347,9 @@ def iter_osm_pois(source: Path, index_path: Path) -> Iterator[PoiRaw]:
     try:
         import osmium
     except ImportError as error:  # pragma: no cover - 由离线环境检查
-        raise RuntimeError("缺少 osmium，请先安装 requirements-data.txt") from error
+        raise RuntimeError(
+            "缺少 osmium，请先执行：python -m pip install -e '.[catalog]'"
+        ) from error
 
     if index_path.exists():
         index_path.unlink()
