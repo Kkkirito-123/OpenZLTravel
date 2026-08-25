@@ -254,6 +254,10 @@ class AssistantService:
     def _build_order(self, snapshot: AssistantSnapshot) -> TravelOrder:
         """裁剪为最小可验证工单；只携带已选事实，路线留给 TravelGraph 生成。"""
 
+        # 两个时间字段必须共享同一个基准值。若只显式设置 facts_refreshed_at，
+        # Pydantic 会在随后补 created_at 的默认值，造成“刷新时间早于工单创建时间”的
+        # 微秒级倒序，进而让签名工单的时间语义和测试结果不稳定。
+        issued_at = datetime.now(timezone.utc)
         catalog = snapshot.facts.catalog
         assert catalog is not None
         selected = set(snapshot.selection.attraction_ids)
@@ -287,11 +291,12 @@ class AssistantService:
             weather=snapshot.facts.weather,
         )
         return TravelOrder(
+            created_at=issued_at,
             requirements=snapshot.requirements,
             facts=facts,
             selection=snapshot.selection,
             fact_metadata=snapshot.fact_metadata,
-            facts_refreshed_at=datetime.now(timezone.utc),
+            facts_refreshed_at=issued_at,
         )
 
     def _build_model(self) -> BaseChatModel | None:
