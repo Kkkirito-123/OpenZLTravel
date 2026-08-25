@@ -17,6 +17,8 @@ from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
 from pydantic import SecretStr
 
+from benchmarks.cases import AssistantBenchmarkCase, GraphBenchmarkCase, load_cases
+from benchmarks.fixtures import assistant_dependencies, planning_dependencies, travel_order
 from assistant.models import (
     AssistantAction,
     AssistantDecision,
@@ -25,8 +27,6 @@ from assistant.models import (
 )
 from assistant.service import AssistantService
 from assistant.tools import AssistantToolbox
-from benchmarks.cases import AssistantBenchmarkCase, GraphBenchmarkCase, load_cases
-from benchmarks.fixtures import assistant_dependencies, planning_dependencies, travel_order
 from domain.errors import TravelGraphError
 from runtime.config import Settings
 from runtime.tokens import SignedPayloadCodec, TokenError

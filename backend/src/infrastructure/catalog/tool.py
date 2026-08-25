@@ -10,16 +10,6 @@ from psycopg import Error as PsycopgError
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-from catalog.enrichment import enrich_catalog, enrich_resolved_place
-from catalog.postgres_compat import execute_sync
-from catalog.queries import CITY_SQL, DESTINATION_SQL, PLACE_SQL, POI_SQL
-from catalog.ranking import (
-    DestinationProfile,
-    destination_profile,
-    normalize_location_name,
-    rank_destinations,
-    region_names,
-)
 from domain.models import (
     CandidateCatalog,
     City,
@@ -27,13 +17,28 @@ from domain.models import (
     Poi,
     ResolvedPlace,
 )
-from providers.base import (
+from infrastructure.catalog.enrichment import enrich_catalog, enrich_resolved_place
+from infrastructure.catalog.postgres_compat import execute_sync
+from infrastructure.catalog.queries import (
+    CITY_SQL,
+    DESTINATION_SQL,
+    PLACE_SQL,
+    POI_SQL,
+)
+from infrastructure.catalog.ranking import (
+    DestinationProfile,
+    destination_profile,
+    normalize_location_name,
+    rank_destinations,
+    region_names,
+)
+from infrastructure.providers.base import (
     AsyncTTLCache,
     CatalogUnavailableError,
     ProviderError,
     stable_key,
 )
-from providers.geo import http_url
+from infrastructure.providers.geo import http_url
 
 
 class CatalogRepository(Protocol):

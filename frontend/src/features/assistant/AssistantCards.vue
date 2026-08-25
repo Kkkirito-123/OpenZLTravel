@@ -10,7 +10,7 @@ import {
 } from "@lucide/vue";
 import { ref, watch } from "vue";
 
-import type { AssistantAction, AssistantSnapshot, RailOption } from "../types";
+import type { AssistantAction, AssistantSnapshot, RailOption } from "../../types";
 
 const props = defineProps<{ snapshot: AssistantSnapshot; busy: boolean }>();
 const emit = defineEmits<{ select: [action: AssistantAction] }>();

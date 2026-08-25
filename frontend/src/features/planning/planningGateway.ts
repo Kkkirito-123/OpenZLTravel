@@ -13,8 +13,8 @@ import type {
   RoutePreviewInterrupt,
   TripRecord,
   TripSummary,
-} from "../types";
-import { emptyPlanningState } from "../types";
+} from "../../types";
+import { emptyPlanningState } from "../../types";
 
 const GRAPH_ID = "travel";
 

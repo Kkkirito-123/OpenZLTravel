@@ -2,7 +2,7 @@ import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 import { nextTick } from "vue";
 
-import HistoryDrawer from "../src/components/HistoryDrawer.vue";
+import HistoryDrawer from "../src/features/trips/HistoryDrawer.vue";
 
 describe("HistoryDrawer", () => {
   it("支持打开行程、二次确认删除和开始新行程", async () => {

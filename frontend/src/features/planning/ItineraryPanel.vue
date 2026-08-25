@@ -24,7 +24,7 @@ import type {
   RailOption,
   TripRecord,
   WeatherDay,
-} from "../types";
+} from "../../types";
 
 const props = defineProps<{ trip: TripRecord; historical?: boolean }>();
 defineEmits<{ back: [] }>();

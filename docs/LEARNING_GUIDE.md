@@ -27,17 +27,17 @@ State、Checkpoint 或节点。
 
 1. `backend/src/travel_graph/state.py`：图状态只剩工单、事实、草稿、预算和结果。
 2. `backend/src/travel_graph/workflow.py`：顺序固定，没有 Supervisor 和需求阶段。
-3. `nodes/order.py`：只接受 `order_token`。
-4. `nodes/planning.py`：确定性日程、最终路线和预算。
-5. `nodes/confirmation.py`：唯一 `route_preview` interrupt 和受限修改。
-6. `nodes/persistence.py`：`user_id + order_id` 幂等保存。
+3. `backend/src/travel_graph/nodes/order.py`：只接受 `order_token`。
+4. `backend/src/travel_graph/nodes/planning.py`：确定性日程、最终路线和预算。
+5. `backend/src/travel_graph/nodes/confirmation.py`：唯一 `route_preview` interrupt 和受限修改。
+6. `backend/src/travel_graph/nodes/persistence.py`：`user_id + order_id` 幂等保存。
 
 ### 前端
 
-1. `frontend/src/pages/AssistantPage.vue`：唯一页面和展示组合。
-2. `frontend/src/composables/useAssistantWorkspace.ts`：浏览器会话、SSE、Thread/Run、断线恢复和历史。
-3. `frontend/src/services/assistantGateway.ts`：Assistant SSE 解析。
-4. `frontend/src/services/planningGateway.ts`：LangGraph SDK 工单启动和 interrupt 恢复。
+1. `frontend/src/features/assistant/AssistantPage.vue`：唯一页面和展示组合。
+2. `frontend/src/features/assistant/useAssistantWorkspace.ts`：浏览器会话、SSE、Thread/Run、断线恢复和历史。
+3. `frontend/src/features/assistant/assistantGateway.ts`：Assistant SSE 解析。
+4. `frontend/src/features/planning/planningGateway.ts`：LangGraph SDK 工单启动和 interrupt 恢复。
 
 ## 3. 一次请求如何流动
 

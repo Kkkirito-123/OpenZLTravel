@@ -4,26 +4,32 @@ from __future__ import annotations
 
 from typing import Literal
 
-from catalog.tool import CatalogTool, PostgresCatalogRepository
-from domain.models import CandidateCatalog, City, DestinationCandidate, HotelOption, Poi
-from providers.amap import AmapClient
-from providers.base import stable_fact_id
-from providers.fakes import (
+from domain.models import (
+    CandidateCatalog,
+    City,
+    DestinationCandidate,
+    HotelOption,
+    Poi,
+)
+from infrastructure.catalog.tool import CatalogTool, PostgresCatalogRepository
+from infrastructure.providers.amap import AmapClient
+from infrastructure.providers.base import stable_fact_id
+from infrastructure.providers.fakes import (
     FakeCatalogProvider,
     FakeHotelProvider,
     FakeRailProvider,
     FakeRouteProvider,
     FakeWeatherProvider,
 )
-from providers.hotels import HotelProvider as LiveHotelProvider
-from providers.hotels import RollingGoHotelClient
-from providers.mcp import McpHttpClient
-from providers.rail import RailClient
-from providers.rail import RailProvider as LiveRailProvider
-from providers.rail_12306 import Public12306Client
-from providers.routes import RouteProvider as LiveRouteProvider
-from providers.weather import OpenMeteoClient
-from providers.weather import WeatherProvider as LiveWeatherProvider
+from infrastructure.providers.hotels import HotelProvider as LiveHotelProvider
+from infrastructure.providers.hotels import RollingGoHotelClient
+from infrastructure.providers.mcp import McpHttpClient
+from infrastructure.providers.rail import RailClient
+from infrastructure.providers.rail import RailProvider as LiveRailProvider
+from infrastructure.providers.rail_12306 import Public12306Client
+from infrastructure.providers.routes import RouteProvider as LiveRouteProvider
+from infrastructure.providers.weather import OpenMeteoClient
+from infrastructure.providers.weather import WeatherProvider as LiveWeatherProvider
 from runtime.config import ConfigurationError, Settings, get_settings
 from runtime.contracts import AssistantDependencies, PlanningDependencies
 

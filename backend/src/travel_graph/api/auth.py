@@ -20,8 +20,8 @@ from langgraph_sdk.auth.types import (
     ThreadsUpdate,
 )
 
-from api.identity import IdentityError, authenticate_identity
 from runtime.config import get_settings
+from runtime.identity import IdentityError, authenticate_identity
 
 auth = Auth()
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { AssistantGateway } from "../src/services/assistantGateway";
+import { AssistantGateway } from "../src/features/assistant/assistantGateway";
 import { emptyAssistantSnapshot } from "../src/types";
 
 afterEach(() => vi.unstubAllGlobals());

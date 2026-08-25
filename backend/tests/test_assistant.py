@@ -25,7 +25,7 @@ from domain.models import (
     TravelOrder,
     TravelRequirements,
 )
-from providers.fakes import (
+from infrastructure.providers.fakes import (
     FakeCatalogProvider,
     FakeHotelProvider,
     FakeRailProvider,

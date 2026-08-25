@@ -8,9 +8,9 @@ from types import SimpleNamespace
 import pytest
 from langgraph_sdk import Auth
 
-from api.auth import filter_run_create, own_created_thread, scope_store
-from api.identity import IdentityCodec, IdentityError, authenticate_identity
 from runtime.config import ConfigurationError, Settings
+from runtime.identity import IdentityCodec, IdentityError, authenticate_identity
+from travel_graph.api.auth import filter_run_create, own_created_thread, scope_store
 
 
 def test_cookie_tampering_and_expiry_are_rejected() -> None:

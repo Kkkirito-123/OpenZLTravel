@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from domain.models import City, DestinationCandidate
-from providers.base import stable_fact_id
+from infrastructure.providers.base import stable_fact_id
 
 REGION_GROUPS = {
     "华东": ("上海", "江苏", "浙江", "安徽", "福建", "江西", "山东"),

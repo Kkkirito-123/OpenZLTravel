@@ -14,11 +14,11 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from api.identity import IdentityError, authenticate_identity
 from assistant.models import AssistantTurnRequest
 from assistant.service import AssistantModelError, AssistantService
 from runtime.config import Settings, get_settings
 from runtime.container import get_assistant_dependencies
+from runtime.identity import IdentityError, authenticate_identity
 from runtime.tokens import SignedPayloadCodec, TokenError
 
 logger = logging.getLogger(__name__)

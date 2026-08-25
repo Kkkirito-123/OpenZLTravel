@@ -12,7 +12,13 @@ import operator
 from typing import Annotated, Literal, TypedDict
 from uuid import UUID
 
-from domain.models import BudgetBreakdown, ItineraryDraft, StrictModel, TravelFacts, TravelOrder
+from domain.models import (
+    BudgetBreakdown,
+    ItineraryDraft,
+    StrictModel,
+    TravelFacts,
+    TravelOrder,
+)
 
 TravelPhase = Literal["planning", "awaiting_route_confirmation", "completed", "failed"]
 

@@ -2,7 +2,7 @@
 import { CheckCircle2, LoaderCircle, Route } from "@lucide/vue";
 import { ref } from "vue";
 
-import type { RoutePreviewInterrupt } from "../types";
+import type { RoutePreviewInterrupt } from "../../types";
 
 const props = defineProps<{ interrupt: RoutePreviewInterrupt; busy: boolean }>();
 const emit = defineEmits<{ confirm: [allowOverBudget: boolean] }>();

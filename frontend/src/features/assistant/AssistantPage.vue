@@ -14,11 +14,11 @@ import {
 } from "@lucide/vue";
 import { computed, nextTick, ref, watch } from "vue";
 
-import AssistantCards from "../components/AssistantCards.vue";
-import HistoryDrawer from "../components/HistoryDrawer.vue";
-import ItineraryPanel from "../components/ItineraryPanel.vue";
-import RoutePreviewCard from "../components/RoutePreviewCard.vue";
-import { useAssistantWorkspace } from "../composables/useAssistantWorkspace";
+import ItineraryPanel from "../planning/ItineraryPanel.vue";
+import RoutePreviewCard from "../planning/RoutePreviewCard.vue";
+import HistoryDrawer from "../trips/HistoryDrawer.vue";
+import AssistantCards from "./AssistantCards.vue";
+import { useAssistantWorkspace } from "./useAssistantWorkspace";
 
 const workspace = useAssistantWorkspace();
 const input = ref("");

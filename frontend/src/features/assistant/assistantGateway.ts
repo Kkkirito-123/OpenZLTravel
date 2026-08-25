@@ -5,7 +5,7 @@
  * session.updated 产生的签名快照交给 composable 保存；handoff.ready 交给页面启动一个
  * 全新的 LangGraph Thread/Run。这样前端不会把 Assistant 的临时状态直接写入 Graph。
  */
-import type { AssistantAction, AssistantHandoff, AssistantSnapshot } from "../types";
+import type { AssistantAction, AssistantHandoff, AssistantSnapshot } from "../../types";
 
 export interface AssistantCallbacks {
   onMessage: (content: string) => void;

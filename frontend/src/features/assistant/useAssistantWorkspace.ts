@@ -10,12 +10,12 @@ import { computed, onMounted, ref } from "vue";
 import {
   AssistantGateway,
   type AssistantTurn,
-} from "../services/assistantGateway";
+} from "./assistantGateway";
 import {
   PlanningGateway,
   type PlanningCallbacks,
   type PlanningRunRequest,
-} from "../services/planningGateway";
+} from "../planning/planningGateway";
 import type {
   AssistantAction,
   AssistantHandoff,
@@ -24,8 +24,8 @@ import type {
   ToolEvent,
   TripRecord,
   TripSummary,
-} from "../types";
-import { emptyAssistantSnapshot, emptyPlanningState } from "../types";
+} from "../../types";
+import { emptyAssistantSnapshot, emptyPlanningState } from "../../types";
 
 const SESSION_TOKEN_KEY = "openzltravel.assistant.token";
 const SESSION_SNAPSHOT_KEY = "openzltravel.assistant.snapshot";

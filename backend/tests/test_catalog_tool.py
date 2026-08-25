@@ -4,10 +4,10 @@ from typing import Any
 
 import pytest
 
-from catalog.ranking import DestinationProfile
-from catalog.tool import CatalogTool, PostgresCatalogRepository
 from domain.models import CandidateCatalog, City, Poi, ResolvedPlace
-from providers.base import CatalogUnavailableError
+from infrastructure.catalog.ranking import DestinationProfile
+from infrastructure.catalog.tool import CatalogTool, PostgresCatalogRepository
+from infrastructure.providers.base import CatalogUnavailableError
 
 
 class ProfileRepository:

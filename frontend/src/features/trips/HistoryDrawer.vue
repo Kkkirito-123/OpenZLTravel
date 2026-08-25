@@ -2,7 +2,7 @@
 import { CalendarDays, LoaderCircle, Plus, Trash2, X } from "@lucide/vue";
 import { nextTick, onBeforeUnmount, ref, watch } from "vue";
 
-import type { TripSummary } from "../types";
+import type { TripSummary } from "../../types";
 
 const props = defineProps<{
   open: boolean;

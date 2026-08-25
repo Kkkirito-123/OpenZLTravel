@@ -8,8 +8,6 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 from langgraph.store.memory import InMemoryStore
 
-from api.identity import IdentityCodec
-from api.web import _get_store, create_app
 from domain.models import (
     BudgetBreakdown,
     City,
@@ -20,6 +18,8 @@ from domain.models import (
     TripRecord,
 )
 from runtime.config import Settings, get_settings
+from runtime.identity import IdentityCodec
+from travel_graph.api.web import _get_store, create_app
 
 
 def test_custom_app_exposes_business_routes() -> None:
