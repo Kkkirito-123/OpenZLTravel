@@ -132,7 +132,10 @@ class HotelProvider:
                 else "酒店实时查询失败，当前展示本地目录候选。"
             )
             return _local_hotels(catalog), False, warning
-        options = _hotel_options(payload, requirements.days_count - 1)
+        options = _sort_hotels(
+            _hotel_options(payload, requirements.days_count - 1),
+            requirements.hotel_level,
+        )
         if options:
             return options, cache_hit, None
         return (
@@ -143,9 +146,8 @@ class HotelProvider:
 
 
 def _search_arguments(requirements: TravelRequirements) -> dict[str, Any]:
-    stars = {"经济": [0.0, 3.0], "舒适": [3.0, 4.5], "品质": [4.0, 5.0]}
     return {
-        "originQuery": f"{requirements.destination}{requirements.hotel_level}酒店",
+        "originQuery": f"{requirements.destination}酒店",
         "place": requirements.destination,
         "placeType": "城市",
         "checkInParam": {
@@ -153,8 +155,7 @@ def _search_arguments(requirements: TravelRequirements) -> dict[str, Any]:
             "checkInDate": requirements.start_date.isoformat() if requirements.start_date else "",
             "stayNights": max(1, requirements.days_count - 1),
         },
-        "filterOptions": {"starRatings": stars[requirements.hotel_level]},
-        "size": 10,
+        "size": 15,
     }
 
 
@@ -167,6 +168,22 @@ def _hotel_options(payload: Any, nights: int) -> list[HotelOption]:
         )
         if (option := _hotel_option(item, nights)) is not None
     ]
+
+
+def _sort_hotels(options: list[HotelOption], hotel_level: str) -> list[HotelOption]:
+    """保留多档真实候选，只把住宿偏好用于稳定排序。"""
+
+    preferred_star = {"经济": 2.5, "舒适": 3.75, "品质": 4.5}[hotel_level]
+    return sorted(
+        options,
+        key=lambda option: (
+            option.star_rating is None,
+            abs((option.star_rating or preferred_star) - preferred_star),
+            option.total_price is None,
+            option.total_price or 0,
+            option.hotel_id,
+        ),
+    )
 
 
 def _hotel_option(item: dict[str, Any], nights: int) -> HotelOption | None:
@@ -208,7 +225,7 @@ def _local_hotels(catalog: CandidateCatalog) -> list[HotelOption]:
             image_url=poi.image_url,
             source="osm",
         )
-        for poi in catalog.hotels[:10]
+        for poi in catalog.hotels[:15]
     ]
 
 

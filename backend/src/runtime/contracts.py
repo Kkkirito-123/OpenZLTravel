@@ -1,8 +1,9 @@
-"""TravelGraph 与外部实现之间的最小依赖契约。
+"""TravelGraph 与外部实现之间的最小 Protocol，保持单向依赖。
 
-本模块位于领域层与实现层之间：图节点只依赖这些 Protocol，Provider 和模型网关负责
-实现它们。把契约放在顶层可以避免 ``graph`` 与 ``providers`` 互相导入，也让依赖方向
-保持为 ``domain <- contracts <- graph/providers``。
+这些 Protocol 是应用层端口，不包含 HTTP、数据库连接或第三方 SDK 类型。Assistant 只
+拿到 Catalog、Rail、Hotel、Weather 四个事实端口；TravelGraph 只拿到 RouteGateway。
+``runtime.container`` 在组合根把真实 Provider 或 Fake Provider 注入进去，因此离线
+Benchmark 可以完全替换外部世界，而不改变业务节点。
 """
 
 from __future__ import annotations
@@ -10,9 +11,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Protocol
-
-from pydantic import BaseModel
+from typing import Protocol
 
 from domain.models import (
     CandidateCatalog,
@@ -21,40 +20,21 @@ from domain.models import (
     HotelOption,
     Poi,
     RailOption,
+    ResolvedPlace,
     RouteSegment,
     TravelRequirements,
     WeatherDay,
 )
 
-ModelMessage = dict[str, str]
-
-
-class StructuredModel(Protocol):
-    """可生成 Pydantic 结构化结果的异步模型网关。
-
-    Graph 只依赖这个 Protocol，而不依赖 OpenAI SDK 的具体类。这样学习和测试时可以
-    注入 FakeModel，生产环境再由 ``model_gateway.py`` 提供真实实现。
-    """
-
-    async def ainvoke(
-        self,
-        messages: Sequence[ModelMessage],
-        *,
-        response_model: type[BaseModel],
-        max_tokens: int,
-    ) -> BaseModel | dict[str, Any]:
-        """调用模型；实现层应使用真正的异步 HTTP 连接池。"""
-
 
 class CatalogGateway(Protocol):
-    """城市解析、POI 查询与确定性目的地推荐的端口。
-
-    CatalogGateway 返回的是事实模型，不返回原始 HTTP JSON。Provider 负责解析和生成
-    稳定 ID，图节点只关心这些稳定的领域对象。
-    """
+    """城市、POI 与目的地推荐端口；只返回带稳定 ID 的事实模型。"""
 
     async def resolve_city(self, destination: str) -> City:
         """把城市名称解析为真实城市事实。"""
+
+    async def resolve_place(self, query: str) -> ResolvedPlace:
+        """区分规范城市与具体地点，并返回 Provider 确认的所属城市/POI。"""
 
     async def search_candidates(self, city: City) -> CandidateCatalog:
         """返回真实 POI 候选池。"""
@@ -70,11 +50,7 @@ class CatalogGateway(Protocol):
 
 
 class RailGateway(Protocol):
-    """12306 车次查询的端口。
-
-    ``bool`` 返回值只是缓存命中信息，不参与业务路由；即使缓存命中，选项仍必须经过
-    同一套事实校验。
-    """
+    """12306 车次端口；缓存命中标志不参与路由，候选仍走同一事实校验。"""
 
     async def search(
         self,
@@ -87,10 +63,7 @@ class RailGateway(Protocol):
 
 
 class HotelGateway(Protocol):
-    """实时酒店与本地目录降级接口的端口。
-
-    返回的第三项是面向用户的降级说明，允许实时酒店失败时仍展示目录候选或自行安排。
-    """
+    """实时酒店与目录降级端口，第三个返回值是面向用户的降级说明。"""
 
     async def search(
         self,
@@ -125,24 +98,25 @@ class RouteGateway(Protocol):
 
 
 @dataclass(frozen=True)
-class TravelDependencies:
-    """TravelGraph 的唯一依赖容器。
+class AssistantDependencies:
+    """交流助手可调用的只读事实端口。
 
-    这是依赖注入的学习入口：图节点接收一个容器，却不知道具体使用高德、12306 还是
-    Fake Provider。``container.py`` 负责组装，测试可以直接构造本类替换任意一项。
+    Assistant 可以查询和筛选事实，但不能通过这些端口保存最终行程，也不能获得
+    TravelGraph 的 Checkpoint。
     """
 
-    # 事实来源端口；具体实现由 runtime.container 装配。
     catalog: CatalogGateway
-    # 去程、返程车次查询端口。
     rail: RailGateway
-    # 实时或目录酒店查询端口。
     hotels: HotelGateway
-    # 日期范围天气查询端口。
     weather: WeatherGateway
-    # 确定性路线查询端口；失败时只产生 warning。
+
+
+@dataclass(frozen=True)
+class PlanningDependencies:
+    """TravelGraph 唯一外部依赖。
+
+    事实发现已经由 Assistant 完成，Graph 只在每日顺序生成后查询相邻 POI 路线。这个
+    依赖集合故意不包含 Catalog、铁路、酒店和天气，防止规划阶段重新越过工单边界。
+    """
+
     routes: RouteGateway
-    # 三个可选模型；为 None 时各 Agent 走确定性降级。
-    requirement_model: StructuredModel | None = None
-    planner_model: StructuredModel | None = None
-    review_model: StructuredModel | None = None

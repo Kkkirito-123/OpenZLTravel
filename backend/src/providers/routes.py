@@ -8,15 +8,14 @@ from typing import Protocol
 
 from domain.models import City, Poi, RouteSegment
 
-from .base import ProviderError
 from .geo import local_route, local_routes
 
 
 class RouteClient(Protocol):
     """实时路线供应商需要的最小异步接口。"""
 
-    async def get_route_with_waypoints(self, day_pois: Sequence[Poi]) -> RouteSegment:
-        """返回按顺序途经当日 POI 的真实驾车路线。"""
+    async def get_route(self, from_poi: Poi, to_poi: Poi) -> RouteSegment:
+        """返回两个相邻 POI 之间的真实驾车路线。"""
 
     async def get_transit(self, city: City, from_poi: Poi, to_poi: Poi) -> RouteSegment:
         """返回两个 POI 之间的真实公交路线。"""
@@ -50,11 +49,24 @@ class RouteProvider:
     ) -> tuple[list[RouteSegment], list[str]]:
         if self.realtime is None:
             return local_routes(day_pois, "driving"), ["实时驾车未配置，当前为本地估算。"]
-        try:
-            route = await self.realtime.get_route_with_waypoints(day_pois)
-        except ProviderError:
+        get_route = getattr(self.realtime, "get_route", None)
+        if get_route is None:
             return local_routes(day_pois, "driving"), ["实时驾车不可用，当前为本地估算。"]
-        return [route], []
+        pairs = list(zip(day_pois, day_pois[1:], strict=False))
+        results = await asyncio.gather(
+            *(get_route(left, right) for left, right in pairs),
+            return_exceptions=True,
+        )
+        routes: list[RouteSegment] = []
+        degraded = False
+        for (left, right), result in zip(pairs, results, strict=True):
+            if isinstance(result, BaseException):
+                routes.append(local_route(left, right, "driving"))
+                degraded = True
+            else:
+                routes.append(result)
+        warnings = ["部分实时驾车路线不可用，已改为本地估算。"] if degraded else []
+        return routes, warnings
 
     async def _transit(
         self, city: City, day_pois: list[Poi]

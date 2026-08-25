@@ -22,7 +22,7 @@ from domain.models import (
 from runtime.config import Settings, get_settings
 
 
-def test_custom_app_exposes_only_four_business_routes() -> None:
+def test_custom_app_exposes_business_routes() -> None:
     """自定义应用不再附带 docs/openapi 路由，平台能力统一由 Agent Server 提供。"""
 
     routes = {

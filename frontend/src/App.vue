@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import WorkbenchPage from "./pages/WorkbenchPage.vue";
+import AssistantPage from "./pages/AssistantPage.vue";
 </script>
 
 <template>
-  <WorkbenchPage />
+  <AssistantPage />
 </template>

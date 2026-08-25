@@ -37,7 +37,6 @@ class Settings:
     model_api_key: str | None
     model_base_url: str | None
     fast_model: str
-    planner_model: str
     provider_mode: ProviderMode
     rail_provider: RailProviderMode
     catalog_database_url: str | None
@@ -53,6 +52,8 @@ class Settings:
     rollinggo_mcp_url: str
     rollinggo_api_key: str | None
     rollinggo_timeout_seconds: float
+    assistant_session_ttl_seconds: int
+    travel_order_ttl_seconds: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -71,8 +72,6 @@ class Settings:
             raise ConfigurationError("生产环境禁止使用 AUTH_MODE=dev")
         if auth_mode == "signed" and (secret is None or len(secret) < 32):
             raise ConfigurationError("AUTH_MODE=signed 要求至少 32 字符的 AUTH_SECRET")
-        if provider_mode == "live" and catalog_database_url is None:
-            raise ConfigurationError("PROVIDER_MODE=live 要求 CATALOG_DATABASE_URL")
         if rail_provider == "mcp" and not _first_env("RAIL_MCP_URL"):
             raise ConfigurationError("RAIL_PROVIDER=mcp 要求 RAIL_MCP_URL")
 
@@ -84,12 +83,9 @@ class Settings:
             cookie_ttl_seconds=_positive_int("AUTH_COOKIE_TTL_SECONDS", 30 * 24 * 3600),
             cookie_secure=_boolean("AUTH_COOKIE_SECURE", environment == "production"),
             dev_user_id=os.getenv("DEV_USER_ID", "dev-local"),
-            # 旧 .env 曾使用 LLM_* 命名。这里仅做读取兼容，运行时统一转换为
-            # 新配置字段，避免用户因为改名而误以为模型“超时或未配置”。
-            model_api_key=_first_env("OPENAI_API_KEY", "LLM_API_KEY"),
-            model_base_url=_first_env("OPENAI_BASE_URL", "LLM_BASE_URL"),
-            fast_model=_first_env("TRAVEL_FAST_MODEL", "LLM_MODEL") or "gpt-5-mini",
-            planner_model=_first_env("TRAVEL_PLANNER_MODEL", "LLM_MODEL") or "gpt-5",
+            model_api_key=_first_env("OPENAI_API_KEY"),
+            model_base_url=_first_env("OPENAI_BASE_URL"),
+            fast_model=_first_env("TRAVEL_FAST_MODEL") or "gpt-5-mini",
             provider_mode=cast(ProviderMode, provider_mode),
             rail_provider=cast(RailProviderMode, rail_provider),
             catalog_database_url=catalog_database_url,
@@ -109,6 +105,10 @@ class Settings:
             ).strip(),
             rollinggo_api_key=_first_env("ROLLINGGO_API_KEY"),
             rollinggo_timeout_seconds=_positive_float("ROLLINGGO_TIMEOUT_SECONDS", 12.0),
+            assistant_session_ttl_seconds=_positive_int(
+                "ASSISTANT_SESSION_TTL_SECONDS", 12 * 3600
+            ),
+            travel_order_ttl_seconds=_positive_int("TRAVEL_ORDER_TTL_SECONDS", 10 * 60),
         )
 
     @property

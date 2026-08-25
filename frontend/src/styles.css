@@ -1,9 +1,4 @@
 @import "./styles/base.css";
-@import "./styles/layout.css";
-@import "./styles/conversation.css";
-@import "./styles/progress.css";
-@import "./styles/interrupts.css";
-@import "./styles/selection.css";
+@import "./styles/assistant.css";
 @import "./styles/itinerary.css";
 @import "./styles/drawer.css";
-@import "./styles/responsive.css";

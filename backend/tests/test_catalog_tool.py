@@ -4,8 +4,9 @@ from typing import Any
 
 import pytest
 
-from catalog import CatalogTool, DestinationProfile, PostgresCatalogRepository
-from domain.models import CandidateCatalog, City
+from catalog.ranking import DestinationProfile
+from catalog.tool import CatalogTool, PostgresCatalogRepository
+from domain.models import CandidateCatalog, City, Poi, ResolvedPlace
 from providers.base import CatalogUnavailableError
 
 
@@ -20,6 +21,9 @@ class ProfileRepository:
 
     async def search_candidates(self, city: City) -> CandidateCatalog:
         raise LookupError(city.name)
+
+    async def resolve_place(self, query: str) -> ResolvedPlace:
+        raise LookupError(query)
 
     async def destination_profiles(
         self, origin: str, region: str
@@ -37,6 +41,21 @@ class FallbackCatalog:
         self.calls += 1
         return City(name=destination, latitude=30, longitude=120)
 
+    async def resolve_place(self, query: str) -> ResolvedPlace:
+        self.calls += 1
+        return ResolvedPlace(
+            query=query,
+            city=City(name="西安", adcode="610100", latitude=34.3, longitude=108.9),
+            poi=Poi(
+                id="focus-1",
+                name=query,
+                category="attraction",
+                latitude=34.4,
+                longitude=109.2,
+                image_url="https://example.com/provider-focus.jpg",
+            ),
+        )
+
     async def search_candidates(self, city: City) -> CandidateCatalog:
         self.calls += 1
         return CandidateCatalog()
@@ -47,6 +66,13 @@ class BrokenRepository(ProfileRepository):
 
     async def resolve_city(self, destination: str) -> City:
         raise CatalogUnavailableError()
+
+
+class CoveredRepository(ProfileRepository):
+    """模拟本地目录已经覆盖规范城市。"""
+
+    async def resolve_city(self, destination: str) -> City:
+        return City(name=destination, latitude=30, longitude=120)
 
 
 class FakeCursor:
@@ -104,12 +130,38 @@ async def test_catalog_falls_back_only_when_city_is_not_covered() -> None:
 
 
 @pytest.mark.asyncio
+async def test_place_resolution_prefers_local_city_and_falls_back_for_poi() -> None:
+    fallback = FallbackCatalog()
+    local_tool = CatalogTool(CoveredRepository([]), fallback)
+
+    city = await local_tool.resolve_place("杭州")
+
+    assert city.city.name == "杭州"
+    assert city.poi is None
+    assert fallback.calls == 0
+
+    remote_tool = CatalogTool(ProfileRepository([]), fallback)
+    place = await remote_tool.resolve_place("云岭遗址")
+
+    assert place.city.name == "西安"
+    assert place.poi is not None
+    assert place.poi.name == "云岭遗址"
+    assert fallback.calls == 1
+
+    replayed = await remote_tool.resolve_place("云岭 遗址")
+    assert replayed.query == "云岭 遗址"
+    assert fallback.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_catalog_outage_does_not_expand_into_amap_requests() -> None:
     fallback = FallbackCatalog()
     tool = CatalogTool(BrokenRepository([]), fallback)
 
     with pytest.raises(CatalogUnavailableError):
         await tool.resolve_city("杭州")
+    with pytest.raises(CatalogUnavailableError):
+        await tool.resolve_place("云岭遗址")
 
     assert fallback.calls == 0
 
@@ -148,6 +200,74 @@ async def test_postgres_catalog_converts_rows_to_stable_facts() -> None:
     assert city.adcode == "330100000000"
     assert catalog.attractions[0].id == "poi:catalog:stable-uuid"
     assert catalog.attractions[0].tags == ["湖泊", "风景名胜"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_resolves_specific_place_from_local_repository_before_fallback() -> None:
+    pool = FakePool(
+        [
+            [],
+            [
+                {
+                    "locationid": "focus-uuid",
+                    "canonicalname": "云岭遗址",
+                    "address": "示例区",
+                    "category": "attraction",
+                    "typename": "历史遗址",
+                    "imageurl": "https://example.com/focus.jpg",
+                    "latitude": 34.4,
+                    "longitude": 109.2,
+                    "cityname": "西安市",
+                    "cityadcode": "610100000000",
+                    "citylatitude": 34.3,
+                    "citylongitude": 108.9,
+                }
+            ],
+        ]
+    )
+    fallback = FallbackCatalog()
+    tool = CatalogTool(PostgresCatalogRepository("", pool=pool), fallback)
+
+    place = await tool.resolve_place("云岭遗址")
+
+    assert place.city.name == "西安市"
+    assert place.poi is not None
+    assert place.poi.id == "poi:catalog:focus-uuid"
+    assert fallback.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_local_place_without_image_uses_confirmed_provider_enrichment() -> None:
+    pool = FakePool(
+        [
+            [],
+            [
+                {
+                    "locationid": "focus-uuid",
+                    "canonicalname": "云岭遗址",
+                    "address": "",
+                    "category": "attraction",
+                    "typename": "历史遗址",
+                    "imageurl": None,
+                    "latitude": 34.4,
+                    "longitude": 109.2,
+                    "cityname": "西安市",
+                    "cityadcode": "610100000000",
+                    "citylatitude": 34.3,
+                    "citylongitude": 108.9,
+                }
+            ],
+        ]
+    )
+    fallback = FallbackCatalog()
+    tool = CatalogTool(PostgresCatalogRepository("", pool=pool), fallback)
+
+    place = await tool.resolve_place("云岭遗址")
+
+    assert place.poi is not None
+    assert place.poi.id == "poi:catalog:focus-uuid"
+    assert place.poi.image_url == "https://example.com/provider-focus.jpg"
+    assert fallback.calls == 1
 
 
 @pytest.mark.asyncio

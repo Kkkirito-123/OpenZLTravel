@@ -1,0 +1,12 @@
+[
+  {"case_id":"graph.plan.001","fixture":"hangzhou_basic","operation":"confirm","expected":{"phase":"completed"}},
+  {"case_id":"graph.plan.002","fixture":"hangzhou_basic","operation":"confirm","expected":{"phase":"completed"}},
+  {"case_id":"graph.security.003","fixture":"hangzhou_basic","operation":"expired_token","expected":{"error_code":"token_expired"}},
+  {"case_id":"graph.revision.001","fixture":"hangzhou_basic","operation":"revise_move","expected":{"revision":"把西湖放到第二天","phase":"completed"}},
+  {"case_id":"graph.revision.002","fixture":"hangzhou_basic","operation":"revise_reduce","expected":{"revision":"第一天少安排一个","phase":"completed"}},
+  {"case_id":"graph.revision.003","fixture":"hangzhou_basic","operation":"revise_unsupported","expected":{"error_code":"unsupported_revision"}},
+  {"case_id":"graph.security.001","fixture":"hangzhou_basic","operation":"legacy_input","expected":{"error_code":"order_token_missing"}},
+  {"case_id":"graph.security.002","fixture":"hangzhou_basic","operation":"cross_user","expected":{"error_code":"token_owner_mismatch"}},
+  {"case_id":"graph.security.004","fixture":"hangzhou_basic","operation":"tampered_token","expected":{"error_code":"token_tampered"}},
+  {"case_id":"graph.persistence.001","fixture":"hangzhou_basic","operation":"idempotent","expected":{"phase":"completed","idempotent":true}}
+]

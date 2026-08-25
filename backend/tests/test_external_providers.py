@@ -7,7 +7,7 @@ from typing import Any
 import httpx
 import pytest
 
-from domain.models import CandidateCatalog, City, Poi, TravelRequirements
+from domain.models import CandidateCatalog, City, Poi, RouteSegment, TravelRequirements
 from providers.amap import AmapClient
 from providers.base import ProviderError
 from providers.hotels import HotelProvider
@@ -16,8 +16,8 @@ from providers.rail import RailProvider
 from providers.rail_12306 import Public12306Client
 from providers.routes import RouteProvider
 from providers.weather import OpenMeteoClient, WeatherProvider
-from runtime.config import get_settings
-from runtime.container import get_dependencies, reset_dependencies
+from runtime.config import ConfigurationError, Settings, get_settings
+from runtime.container import get_assistant_dependencies, reset_dependencies
 
 
 def _poi(identifier: str, longitude: float = 120.1) -> Poi:
@@ -38,12 +38,26 @@ def test_default_dependency_factory_uses_offline_providers(monkeypatch: pytest.M
     get_settings.cache_clear()
     reset_dependencies()
 
-    dependencies = get_dependencies()
+    dependencies = get_assistant_dependencies()
 
     assert dependencies.catalog.__class__.__name__ == "FakeCatalogProvider"
     assert dependencies.rail.__class__.__name__ == "FakeRailProvider"
     reset_dependencies()
     get_settings.cache_clear()
+
+
+def test_live_assistant_requires_catalog_but_planning_service_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("AUTH_MODE", "signed")
+    monkeypatch.setenv("AUTH_SECRET", "s" * 32)
+    monkeypatch.setenv("PROVIDER_MODE", "live")
+    monkeypatch.delenv("CATALOG_DATABASE_URL", raising=False)
+    settings = Settings.from_env()
+
+    with pytest.raises(ConfigurationError, match="Assistant.*CATALOG_DATABASE_URL"):
+        get_assistant_dependencies(settings)
 
 
 @pytest.mark.asyncio
@@ -163,6 +177,58 @@ async def test_amap_keeps_stable_ids_and_only_real_polyline() -> None:
 
 
 @pytest.mark.asyncio
+async def test_amap_resolve_place_distinguishes_city_from_specific_poi() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/geocode/geo"):
+            query = request.url.params["address"]
+            return httpx.Response(
+                200,
+                json={
+                    "status": "1",
+                    "geocodes": [
+                        {
+                            "city": "西安市",
+                            "adcode": "610100",
+                            "location": "108.94,34.34",
+                            "level": "市" if query == "西安" else "兴趣点",
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "status": "1",
+                "pois": [
+                    {
+                        "id": "focus-1",
+                        "name": "云岭遗址",
+                        "location": "109.20,34.40",
+                        "address": "西安市示例区",
+                        "type": "风景名胜;历史遗址",
+                        "photos": [{"url": "https://example.com/focus.jpg"}],
+                    }
+                ],
+            },
+        )
+
+    http = httpx.AsyncClient(
+        base_url="https://amap.invalid/v3", transport=httpx.MockTransport(handler)
+    )
+    client = AmapClient("test-key", http=http)
+
+    city = await client.resolve_place("西安")
+    place = await client.resolve_place("云岭遗址")
+
+    assert city.poi is None
+    assert place.city.name == "西安市"
+    assert place.poi is not None
+    assert place.poi.name == "云岭遗址"
+    assert place.poi.image_url == "https://example.com/focus.jpg"
+    await http.aclose()
+
+
+@pytest.mark.asyncio
 async def test_amap_enrichment_prioritizes_hotel_display_fields() -> None:
     keywords: list[str] = []
 
@@ -217,6 +283,61 @@ async def test_amap_enrichment_prioritizes_hotel_display_fields() -> None:
     assert enriched.hotels[0].address == "湖畔酒店真实地址"
     assert enriched.hotels[0].image_url == "https://example.com/hotel.jpg"
     assert enriched.attractions[0].address == ""
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_amap_enrichment_prioritizes_first_screen_attractions() -> None:
+    keywords: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        keyword = request.url.params["keywords"]
+        keywords.append(keyword)
+        return httpx.Response(
+            200,
+            json={
+                "status": "1",
+                "pois": [
+                    {
+                        "id": f"amap-{keyword}",
+                        "name": keyword,
+                        "location": "120.155,30.274",
+                        "address": f"{keyword}真实地址",
+                        "type": "风景名胜",
+                        "photos": [{"url": "https://example.com/attraction.jpg"}],
+                    }
+                ],
+            },
+        )
+
+    http = httpx.AsyncClient(
+        base_url="https://amap.invalid/v3", transport=httpx.MockTransport(handler)
+    )
+    client = AmapClient("test-key", http=http)
+    city = City(name="南京", adcode="320100", latitude=32.0, longitude=118.8)
+    attractions = [_poi(f"景点{i:02d}") for i in range(12)]
+    hotels = [
+        Poi(
+            id=f"hotel-{i:02d}",
+            name=f"酒店{i:02d}",
+            category="hotel",
+            latitude=30.2,
+            longitude=120.1,
+        )
+        for i in range(8)
+    ]
+
+    enriched = await client.enrich_catalog(
+        city,
+        CandidateCatalog(attractions=attractions, hotels=hotels),
+    )
+
+    assert keywords[:12] == [f"景点{i:02d}" for i in range(12)]
+    assert all(
+        item.image_url == "https://example.com/attraction.jpg"
+        for item in enriched.attractions
+    )
+    assert len(keywords) == 20
     await http.aclose()
 
 
@@ -408,6 +529,27 @@ class FailedRoutes:
         raise ProviderError("route_failed", "offline")
 
 
+class SuccessfulRoutes:
+    """记录实时驾车是否按相邻 POI 查询。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    async def get_route(self, from_poi: Poi, to_poi: Poi) -> RouteSegment:
+        self.calls.append((from_poi.id, to_poi.id))
+        return RouteSegment(
+            from_poi_id=from_poi.id,
+            to_poi_id=to_poi.id,
+            distance_km=1,
+            duration_minutes=10,
+            mode="driving",
+            source="amap",
+        )
+
+    async def get_transit(self, city: City, from_poi: Poi, to_poi: Poi) -> Any:
+        raise NotImplementedError
+
+
 @pytest.mark.asyncio
 async def test_route_failure_uses_estimate_without_fake_polyline() -> None:
     provider = RouteProvider(FailedRoutes())
@@ -419,3 +561,22 @@ async def test_route_failure_uses_estimate_without_fake_polyline() -> None:
     assert warnings
     assert routes[0].source == "local_estimate"
     assert routes[0].polyline == []
+
+
+@pytest.mark.asyncio
+async def test_realtime_driving_returns_each_adjacent_segment() -> None:
+    client = SuccessfulRoutes()
+    provider = RouteProvider(client)
+
+    routes, warnings = await provider.get_routes(
+        City(name="杭州"),
+        [_poi("a"), _poi("b", 120.2), _poi("c", 120.3)],
+        "realtime_driving",
+    )
+
+    assert warnings == []
+    assert client.calls == [("a", "b"), ("b", "c")]
+    assert [(route.from_poi_id, route.to_poi_id) for route in routes] == [
+        ("a", "b"),
+        ("b", "c"),
+    ]

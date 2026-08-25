@@ -1,14 +1,15 @@
-"""TravelGraph 的统一领域模型。
+"""Assistant 与 TravelGraph 共享的严格旅行领域模型。
 
-用户需求、Provider 事实、Agent 草稿和最终行程在此拥有明确边界。
-所有模型禁止未声明字段，防止 LLM 或上游响应把不受控数据带入图状态。
+这里是两个应用边界之间的共享内核，不包含网络、数据库、LLM 或 FastAPI 对象。字段
+约定为：requirements 是意图，facts 是 Provider 事实，selection 是用户选择，draft、
+budget、routes 是 Graph 结果；未知价格、天气和库存必须保持为空。
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from typing import Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -20,7 +21,12 @@ class StrictModel(BaseModel):
 
 
 class TravelRequirements(StrictModel):
-    """一次旅行的统一需求；不完整时也可存入图状态。"""
+    """一次旅行的统一需求；Assistant 阶段允许不完整，Graph 工单阶段必须完整。
+
+    ``trip_days`` 和 ``end_date`` 是相互关联的派生信息：已知开始日和天数时自动计算结束
+    日；已知起止日期时自动回算天数。模型不会为了补齐开始日期而猜测当前日期，避免把
+    不确定的自然语言输入误当成可规划事实。
+    """
 
     origin: str | None = Field(default=None, max_length=40)
     destination: str | None = Field(default=None, max_length=40)
@@ -32,9 +38,9 @@ class TravelRequirements(StrictModel):
     budget: float | None = Field(default=None, ge=0)
     pace: Literal["轻松", "适中", "紧凑"] = "适中"
     hotel_level: Literal["经济", "舒适", "品质"] = "舒适"
-    transport_mode: Literal[
-        "auto", "walk", "driving", "transit", "realtime_driving"
-    ] = "auto"
+    transport_mode: Literal["auto", "walk", "driving", "transit", "realtime_driving"] = "auto"
+    # 点名地点只保存 Provider 规范名，Catalog 再把真实 POI ID 标为必去项。
+    requested_places: list[str] = Field(default_factory=list, max_length=5)
     preferences: list[str] = Field(default_factory=list, max_length=8)
     dietary_preferences: list[str] = Field(default_factory=list, max_length=5)
 
@@ -63,7 +69,8 @@ class TravelRequirements(StrictModel):
             missing.append("destination_or_region")
         if not self.start_date:
             missing.append("start_date")
-        if not self.end_date:
+        # 只说“玩三天”时先保存天数，开始日期补齐后再自动计算结束日期。
+        if not self.end_date and not self.trip_days:
             missing.append("end_date")
         return missing
 
@@ -77,21 +84,21 @@ class TravelRequirements(StrictModel):
 
 
 class RequirementPatch(StrictModel):
-    """RequirementAgent 或 interrupt 恢复输入的局部需求。"""
+    """Assistant 从一轮自然语言中提取的局部需求。"""
 
     origin: str | None = Field(default=None, max_length=40)
     destination: str | None = Field(default=None, max_length=40)
     region: str | None = Field(default=None, max_length=40)
     start_date: date | None = None
     end_date: date | None = None
-    trip_days: int | None = Field(default=None, ge=1, le=7)
+    # Patch 可暂存超长天数，合并 TravelRequirements 时再转成可恢复的字段错误。
+    trip_days: int | None = Field(default=None, ge=1)
     travelers: int | None = Field(default=None, ge=1, le=20)
     budget: float | None = Field(default=None, ge=0)
     pace: Literal["轻松", "适中", "紧凑"] | None = None
     hotel_level: Literal["经济", "舒适", "品质"] | None = None
-    transport_mode: Literal[
-        "auto", "walk", "driving", "transit", "realtime_driving"
-    ] | None = None
+    transport_mode: Literal["auto", "walk", "driving", "transit", "realtime_driving"] | None = None
+    requested_places: list[str] | None = Field(default=None, max_length=5)
     preferences: list[str] | None = Field(default=None, max_length=8)
     dietary_preferences: list[str] | None = Field(default=None, max_length=5)
 
@@ -106,7 +113,7 @@ class City(StrictModel):
 
 
 class Poi(StrictModel):
-    """可被 PlannerAgent 引用的真实地点。"""
+    """可被 Assistant 选择并交给确定性规划器的真实地点。"""
 
     id: str = Field(min_length=1)
     name: str = Field(min_length=1)
@@ -119,12 +126,30 @@ class Poi(StrictModel):
     tags: list[str] = Field(default_factory=list)
 
 
+class ResolvedPlace(StrictModel):
+    """Catalog 的地点解析事实；``poi=None`` 表示输入本身是规范城市。"""
+
+    query: str = Field(min_length=1, max_length=80)
+    city: City
+    poi: Poi | None = None
+
+
 class CandidateCatalog(StrictModel):
     """某城市的真实 POI 候选池。"""
 
     attractions: list[Poi] = Field(default_factory=list)
     restaurants: list[Poi] = Field(default_factory=list)
     hotels: list[Poi] = Field(default_factory=list)
+    required_attraction_ids: list[str] = Field(default_factory=list, max_length=28)
+
+    @model_validator(mode="after")
+    def required_attractions_exist(self) -> "CandidateCatalog":
+        """必去 ID 必须来自当前真实景点池，不能由 Agent 或客户端注入。"""
+
+        known = {item.id for item in self.attractions}
+        if unknown := [item for item in self.required_attraction_ids if item not in known]:
+            raise ValueError(f"必去地点不在候选池中: {', '.join(unknown)}")
+        return self
 
     @property
     def all(self) -> list[Poi]:
@@ -229,8 +254,9 @@ class RailChoice(StrictModel):
 
 
 class TravelSelection(StrictModel):
-    """交通与住宿 interrupt 恢复后的受控选择。"""
+    """Assistant 校验后的景点、交通与住宿选择。"""
 
+    attraction_ids: list[str] = Field(default_factory=list, max_length=28)
     outbound: RailChoice | None = None
     return_trip: RailChoice | None = None
     hotel_id: str | None = None
@@ -240,7 +266,7 @@ class TravelSelection(StrictModel):
 
 
 class ActivityDraft(StrictModel):
-    """PlannerAgent 产生的单个活动，只允许引用 POI ID。"""
+    """确定性规划器产生的单个活动，只允许引用 POI ID。"""
 
     poi_id: str
     start_time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -260,28 +286,11 @@ class DayDraft(StrictModel):
 
 
 class ItineraryDraft(StrictModel):
-    """PlannerAgent 的结构化输出。"""
+    """确定性规划器的结构化输出。"""
 
     summary: str = Field(min_length=1, max_length=300)
     days: list[DayDraft] = Field(min_length=1, max_length=7)
     tips: list[str] = Field(default_factory=list, max_length=8)
-
-
-class ReviewIssue(StrictModel):
-    """ReviewAgent 发现的一条可定位问题。"""
-
-    code: str
-    message: str
-    day_index: int | None = Field(default=None, ge=1, le=7)
-    severity: Literal["warning", "error"] = "warning"
-
-
-class ReviewResult(StrictModel):
-    """ReviewAgent 的受控审查结果。"""
-
-    passed: bool
-    issues: list[ReviewIssue] = Field(default_factory=list, max_length=12)
-    revision_instruction: str | None = Field(default=None, max_length=600)
 
 
 class TravelFacts(StrictModel):
@@ -308,8 +317,22 @@ class BudgetBreakdown(StrictModel):
     currency: Literal["CNY"] = "CNY"
 
 
+class SelectionBudgetPreview(StrictModel):
+    """交通住宿确认前的确定性预算预览。"""
+
+    budget_limit: float | None = Field(default=None, ge=0)
+    intercity_transport: float | None = Field(default=None, ge=0)
+    hotel: float | None = Field(default=None, ge=0)
+    meals_estimated: float = Field(default=0, ge=0)
+    tickets_estimated: float = Field(default=0, ge=0)
+    estimated_total: float = Field(default=0, ge=0)
+    estimated_remaining: float | None = None
+    unknown_costs: list[str] = Field(default_factory=list)
+    is_over_budget: bool = False
+
+
 class PlaceSnapshot(StrictModel):
-    """从 Provider 事实复制的最小展示快照，不接受 Agent 文案。"""
+    """从 Provider 事实复制的最小展示快照，不接受生成式文案。"""
 
     fact_id: str
     name: str
@@ -320,6 +343,42 @@ class PlaceSnapshot(StrictModel):
     image_url: str | None = None
 
 
+class FactStamp(StrictModel):
+    """Assistant 查询事实时记录的来源与时间。"""
+
+    source: str = Field(min_length=1, max_length=80)
+    queried_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class TravelOrder(StrictModel):
+    """交流助手确认后交付给 TravelGraph 的不可变规划工单。
+
+    这是 Assistant 与 TravelGraph 之间的交接聚合：必须包含完整需求、城市、候选事实和
+    用户选择，但不允许携带 Graph 尚未生成的最终路线。工单本身会被放入签名令牌，因而
+    它不是“前端提交的普通 JSON”，而是经过服务端事实校验后的可信输入。
+    """
+
+    order_id: UUID = Field(default_factory=uuid4)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    facts_refreshed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    requirements: TravelRequirements
+    facts: TravelFacts
+    selection: TravelSelection
+    fact_metadata: dict[str, FactStamp] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_complete_order(self) -> "TravelOrder":
+        """确认工单边界：需求完整、城市和 POI 存在、路线尚未生成。"""
+
+        if self.requirements.missing_fields() or not self.requirements.destination:
+            raise ValueError("旅行工单需求不完整")
+        if self.facts.city is None or self.facts.catalog is None:
+            raise ValueError("旅行工单缺少城市或 POI 事实")
+        if self.facts.routes:
+            raise ValueError("最终路线必须由 TravelGraph 生成")
+        return self
+
+
 class TripRecord(StrictModel):
     """最终校验后写入 Store 的完整行程。"""
 
@@ -328,6 +387,8 @@ class TripRecord(StrictModel):
     requirements: TravelRequirements
     city: City
     selection: TravelSelection
+    outbound_rail: RailOption | None = None
+    return_rail: RailOption | None = None
     draft: ItineraryDraft
     weather: list[WeatherDay]
     routes: dict[int, list[RouteSegment]]

@@ -92,10 +92,10 @@ async def test_thread_run_and_store_are_scoped_to_owner() -> None:
     assert store_value["namespace"] == ("alice", "trips")
 
 
-def test_unsafe_production_and_live_config_are_rejected(
+def test_unsafe_production_is_rejected_but_planning_can_load_without_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """生产开发身份和缺少目录数据库的 live Provider 都不能启动。"""
+    """生产开发身份被拒绝；独立 TravelGraph 配置不再强制依赖 Catalog。"""
 
     monkeypatch.setenv("APP_ENV", "production")
     monkeypatch.setenv("AUTH_MODE", "dev")
@@ -108,8 +108,8 @@ def test_unsafe_production_and_live_config_are_rejected(
     monkeypatch.setenv("AUTH_SECRET", "s" * 32)
     monkeypatch.setenv("PROVIDER_MODE", "live")
     monkeypatch.delenv("CATALOG_DATABASE_URL", raising=False)
-    with pytest.raises(ConfigurationError, match="CATALOG_DATABASE_URL"):
-        Settings.from_env()
+    settings = Settings.from_env()
+    assert settings.catalog_database_url is None
 
 
 def _settings(

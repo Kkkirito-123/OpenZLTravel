@@ -23,6 +23,57 @@ ORDER BY
 LIMIT 1
 """
 
+PLACE_SQL = """
+WITH matched AS (
+    SELECT
+        l.locationid,
+        l.canonicalname,
+        l.pointgeom,
+        l.importance,
+        p.address,
+        p.category,
+        p.typename,
+        p.imageurl,
+        rm.regionid,
+        n.nametype,
+        n.priority
+    FROM catalog.locationname AS n
+    JOIN catalog.location AS l ON l.locationid = n.locationid
+    JOIN catalog.poi AS p ON p.locationid = l.locationid
+    JOIN catalog.regionmatch AS rm ON rm.locationid = l.locationid
+    WHERE n.normalizedname = %s
+      AND p.category = 'attraction'
+      AND l.pointgeom IS NOT NULL
+      AND rm.regionid IS NOT NULL
+)
+SELECT
+    matched.locationid,
+    matched.canonicalname,
+    matched.address,
+    matched.category,
+    matched.typename,
+    matched.imageurl,
+    ST_Y(matched.pointgeom) AS latitude,
+    ST_X(matched.pointgeom) AS longitude,
+    city.name AS cityname,
+    city.adcode AS cityadcode,
+    ST_Y(COALESCE(citylocation.pointgeom, boundary.centergeom)) AS citylatitude,
+    ST_X(COALESCE(citylocation.pointgeom, boundary.centergeom)) AS citylongitude
+FROM matched
+JOIN catalog.region AS matchedregion ON matchedregion.regionid = matched.regionid
+JOIN catalog.region AS city ON matchedregion.path <@ city.path AND city.level = 2
+JOIN catalog.location AS citylocation ON citylocation.locationid = city.regionid
+LEFT JOIN catalog.boundary AS boundary ON boundary.regionid = city.regionid
+WHERE COALESCE(citylocation.pointgeom, boundary.centergeom) IS NOT NULL
+ORDER BY
+    (city.status = 'current') DESC,
+    (matched.nametype = 'official') DESC,
+    matched.priority DESC,
+    matched.importance DESC,
+    matched.locationid
+LIMIT 1
+"""
+
 POI_SQL = """
 WITH center AS (
     SELECT ST_SetSRID(ST_MakePoint(%s, %s), 4326) AS pointgeom
@@ -62,9 +113,9 @@ SELECT
     longitude
 FROM ranked
 WHERE categoryrank <= CASE category
-    WHEN 'attraction' THEN 12
+    WHEN 'attraction' THEN 24
     WHEN 'restaurant' THEN 12
-    ELSE 8
+    ELSE 15
 END
 ORDER BY category, categoryrank
 """
