@@ -7,17 +7,17 @@ from typing import Any
 import httpx
 import pytest
 
-from domain.models import CandidateCatalog, City, Poi, RouteSegment, TravelRequirements
-from providers.amap import AmapClient
-from providers.base import ProviderError
-from providers.hotels import HotelProvider
-from providers.mcp import McpHttpClient
-from providers.rail import RailProvider
-from providers.rail_12306 import Public12306Client
-from providers.routes import RouteProvider
-from providers.weather import OpenMeteoClient, WeatherProvider
-from runtime.config import ConfigurationError, Settings, get_settings
-from runtime.container import get_assistant_dependencies, reset_dependencies
+from openzltravel.domain.models import CandidateCatalog, City, Poi, RouteSegment, TravelRequirements
+from openzltravel.infrastructure.providers.amap import AmapClient
+from openzltravel.infrastructure.providers.base import ProviderError
+from openzltravel.infrastructure.providers.hotels import HotelProvider
+from openzltravel.infrastructure.providers.mcp import McpHttpClient
+from openzltravel.infrastructure.providers.rail import RailProvider
+from openzltravel.infrastructure.providers.rail_12306 import Public12306Client
+from openzltravel.infrastructure.providers.routes import RouteProvider
+from openzltravel.infrastructure.providers.weather import OpenMeteoClient, WeatherProvider
+from openzltravel.runtime.config import ConfigurationError, Settings, get_settings
+from openzltravel.runtime.container import get_assistant_dependencies, reset_dependencies
 
 
 def _poi(identifier: str, longitude: float = 120.1) -> Poi:
@@ -476,7 +476,7 @@ async def test_rollinggo_client_uses_search_hotels_tool_without_token_file() -> 
             calls.append(("searchHotels", arguments))
             return {"hotels": []}
 
-    from providers.hotels import RollingGoHotelClient
+    from openzltravel.infrastructure.providers.hotels import RollingGoHotelClient
 
     client = RollingGoHotelClient("https://mcp.invalid/mcp", "", client=FakeRollingGo())
     result = await client.search({"place": "杭州"})

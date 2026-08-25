@@ -7,16 +7,16 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 from langchain_core.messages import AIMessage
 
-import assistant.service as assistant_service_module
-from assistant.models import (
+import openzltravel.assistant.service as assistant_service_module
+from openzltravel.assistant.models import (
     AssistantAction,
     AssistantDecision,
     AssistantSnapshot,
     AssistantTurnRequest,
 )
-from assistant.service import AssistantModelError, AssistantService
-from assistant.tools import AssistantToolbox
-from domain.models import (
+from openzltravel.assistant.service import AssistantModelError, AssistantService
+from openzltravel.assistant.tools import AssistantToolbox
+from openzltravel.domain.models import (
     CandidateCatalog,
     City,
     DestinationCandidate,
@@ -25,15 +25,15 @@ from domain.models import (
     TravelOrder,
     TravelRequirements,
 )
-from providers.fakes import (
+from openzltravel.infrastructure.providers.fakes import (
     FakeCatalogProvider,
     FakeHotelProvider,
     FakeRailProvider,
     FakeWeatherProvider,
 )
-from runtime.config import Settings
-from runtime.contracts import AssistantDependencies
-from runtime.tokens import SignedPayloadCodec, TokenError
+from openzltravel.runtime.config import Settings
+from openzltravel.runtime.contracts import AssistantDependencies
+from openzltravel.runtime.tokens import SignedPayloadCodec, TokenError
 
 
 class ScriptedAssistantService(AssistantService):

@@ -13,17 +13,17 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from domain.models import CandidateCatalog, City, Poi, TravelFacts, TravelRequirements
-from travel_graph.checkpoint import (
+from openzltravel.domain.models import CandidateCatalog, City, Poi, TravelFacts, TravelRequirements
+from openzltravel.travel_graph.checkpoint import (
     CHECKPOINT_ALLOWED_MSGPACK_MODULES,
     create_checkpoint_serializer,
     create_checkpointer,
     create_memory_checkpointer,
 )
-from travel_graph.state import GraphNotice
+from openzltravel.travel_graph.state import GraphNotice
 
 EXPECTED_CHECKPOINT_TYPES = {
-    ("domain.models", name)
+    ("openzltravel.domain.models", name)
     for name in {
         "TravelRequirements",
         "City",
@@ -44,7 +44,7 @@ EXPECTED_CHECKPOINT_TYPES = {
         "FactStamp",
         "TravelOrder",
     }
-} | {("travel_graph.state", "GraphNotice")}
+} | {("openzltravel.travel_graph.state", "GraphNotice")}
 
 
 class CheckpointState(TypedDict, total=False):
@@ -124,7 +124,7 @@ def test_langgraph_config_uses_custom_strict_checkpointer() -> None:
 
     assert checkpointer["backend"] == "custom"
     assert checkpointer["path"] == (
-        "./backend/src/travel_graph/checkpoint.py:create_checkpointer"
+        "./backend/src/openzltravel/travel_graph/checkpoint.py:create_checkpointer"
     )
     assert "serde" not in checkpointer
     assert set(CHECKPOINT_ALLOWED_MSGPACK_MODULES) == EXPECTED_CHECKPOINT_TYPES

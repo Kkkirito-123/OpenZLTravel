@@ -1,7 +1,7 @@
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 
-import ItineraryPanel from "../src/components/ItineraryPanel.vue";
+import ItineraryPanel from "../src/features/planning/ItineraryPanel.vue";
 import type { TripRecord } from "../src/types";
 
 describe("ItineraryPanel", () => {

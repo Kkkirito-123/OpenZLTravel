@@ -2,8 +2,8 @@
 
 import pytest
 
-from domain.errors import FactBoundaryError
-from domain.models import (
+from openzltravel.domain.errors import FactBoundaryError
+from openzltravel.domain.models import (
     ActivityDraft,
     CandidateCatalog,
     DayDraft,
@@ -12,7 +12,7 @@ from domain.models import (
     RouteSegment,
     TravelFacts,
 )
-from domain.validation import validate_routes
+from openzltravel.domain.validation import validate_routes
 
 
 def _poi(poi_id: str) -> Poi:

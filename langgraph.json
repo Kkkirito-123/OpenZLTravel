@@ -4,18 +4,18 @@
     "./backend"
   ],
   "graphs": {
-    "travel": "./backend/src/travel_graph/application.py:travel"
+    "travel": "./backend/src/openzltravel/travel_graph/application.py:travel"
   },
   "auth": {
-    "path": "./backend/src/api/auth.py:auth",
+    "path": "./backend/src/openzltravel/travel_graph/api/auth.py:auth",
     "disable_studio_auth": true
   },
   "checkpointer": {
     "backend": "custom",
-    "path": "./backend/src/travel_graph/checkpoint.py:create_checkpointer"
+    "path": "./backend/src/openzltravel/travel_graph/checkpoint.py:create_checkpointer"
   },
   "http": {
-    "app": "./backend/src/api/web.py:app",
+    "app": "./backend/src/openzltravel/travel_graph/api/web.py:app",
     "enable_custom_route_auth": true,
     "disable_store": true,
     "disable_webhooks": true,

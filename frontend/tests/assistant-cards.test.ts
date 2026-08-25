@@ -1,7 +1,7 @@
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
 
-import AssistantCards from "../src/components/AssistantCards.vue";
+import AssistantCards from "../src/features/assistant/AssistantCards.vue";
 import { emptyAssistantSnapshot } from "../src/types";
 
 describe("AssistantCards", () => {
