@@ -13,47 +13,89 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = REPOSITORY_ROOT / "backend"
 CORE_ROOT = BACKEND_ROOT / "src"
-EXPECTED_SOURCE_PACKAGES = {
-    "api",
+PACKAGE_ROOT = CORE_ROOT / "openzltravel"
+EXPECTED_APPLICATION_PACKAGES = {
     "assistant",
-    "catalog",
     "domain",
-    "providers",
+    "infrastructure",
     "runtime",
     "travel_graph",
 }
 
-ALLOWED_INTERNAL_IMPORTS = {
+ALLOWED_INTERNAL_IMPORTS: dict[str, set[str]] = {
     # 领域层只依赖自身；第三方 Pydantic 是数据建模工具，不改变这条方向。
-    "domain": {"domain"},
+    "openzltravel.domain": {"openzltravel.domain"},
     # Provider 和 Catalog 是事实适配层，可以共享领域模型与 Provider 基础设施。
-    "providers": {"domain", "providers"},
-    "catalog": {"catalog", "domain", "providers"},
+    "openzltravel.infrastructure.providers": {
+        "openzltravel.domain",
+        "openzltravel.infrastructure.providers",
+    },
+    "openzltravel.infrastructure.catalog": {
+        "openzltravel.domain",
+        "openzltravel.infrastructure.catalog",
+        "openzltravel.infrastructure.providers",
+    },
     # Assistant 是独立业务服务，只通过 runtime 契约访问事实 Provider。
-    "assistant": {"api", "assistant", "domain", "runtime"},
+    "openzltravel.assistant": {
+        "openzltravel.assistant",
+        "openzltravel.domain",
+        "openzltravel.runtime",
+    },
     # runtime 是组合层，负责把实现装配成 Graph 所需的 Protocol。
-    "runtime": {"catalog", "domain", "providers", "runtime"},
+    "openzltravel.runtime": {
+        "openzltravel.domain",
+        "openzltravel.infrastructure.catalog",
+        "openzltravel.infrastructure.providers",
+        "openzltravel.runtime",
+    },
     # Graph 只能依赖领域模型、runtime 契约/令牌和自身节点；不能绕过容器接 Provider。
-    "travel_graph": {"domain", "runtime", "travel_graph"},
-    # API 只负责平台边界和历史读取，不参与 Graph 编排。
-    "api": {"api", "domain", "runtime"},
+    "openzltravel.travel_graph": {
+        "openzltravel.domain",
+        "openzltravel.runtime",
+        "openzltravel.travel_graph",
+    },
 }
 
 
-def test_source_root_is_grouped_by_responsibility() -> None:
-    """源码根目录只保留明确职责包，不再嵌套项目同名包。"""
+def _imported_modules(path: Path) -> list[str]:
+    """提取一个 Python 文件的绝对导入模块，供目录依赖规则复用。"""
 
-    packages = {
+    modules: list[str] = []
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.append(node.module)
+    return modules
+
+
+def test_source_root_is_grouped_by_responsibility() -> None:
+    """源码只有一个项目根包，根包内再按两个服务和共享职责分组。"""
+
+    source_packages = {
         path.name
         for path in CORE_ROOT.iterdir()
         if path.is_dir() and (path / "__init__.py").is_file()
     }
-    assert packages == EXPECTED_SOURCE_PACKAGES
-    assert not (CORE_ROOT / "openzltravel").exists()
+    application_packages = {
+        path.name
+        for path in PACKAGE_ROOT.iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file()
+    }
+    infrastructure_packages = {
+        path.name
+        for path in (PACKAGE_ROOT / "infrastructure").iterdir()
+        if path.is_dir() and (path / "__init__.py").is_file()
+    }
+    assert source_packages == {"openzltravel"}
+    assert application_packages == EXPECTED_APPLICATION_PACKAGES
+    assert infrastructure_packages == {"catalog", "providers"}
+    assert (PACKAGE_ROOT / "travel_graph" / "api").is_dir()
 
 
 def test_source_imports_use_responsibility_packages() -> None:
-    """源码导入不得重新引入项目名或 src 前缀。"""
+    """内部绝对导入必须从唯一的 ``openzltravel`` 根包开始。"""
 
     violations: list[str] = []
     for path in CORE_ROOT.rglob("*.py"):
@@ -66,7 +108,17 @@ def test_source_imports_use_responsibility_packages() -> None:
             else:
                 continue
             for module in modules:
-                if module == "src" or module.startswith(("src.", "openzltravel.")):
+                internal_names = {
+                    "assistant",
+                    "api",
+                    "catalog",
+                    "domain",
+                    "providers",
+                    "runtime",
+                    "travel_graph",
+                }
+                root = module.split(".", 1)[0]
+                if module == "src" or module.startswith("src.") or root in internal_names:
                     violations.append(f"{path}: import {module}")
     assert violations == []
 
@@ -80,20 +132,16 @@ def test_internal_dependency_direction_matches_architecture() -> None:
 
     violations: list[str] = []
     for package, allowed in ALLOWED_INTERNAL_IMPORTS.items():
-        package_root = CORE_ROOT / package
+        package_root = CORE_ROOT.joinpath(*package.split("."))
         for path in package_root.rglob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    modules = [alias.name for alias in node.names]
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    modules = [node.module]
-                else:
+            for module in _imported_modules(path):
+                if not module.startswith("openzltravel."):
                     continue
-                for module in modules:
-                    root = module.split(".", 1)[0]
-                    if root in ALLOWED_INTERNAL_IMPORTS and root not in allowed:
-                        violations.append(f"{path}: {module}")
+                if not any(
+                    module == prefix or module.startswith(f"{prefix}.")
+                    for prefix in allowed
+                ):
+                    violations.append(f"{path}: {module}")
     assert violations == []
 
 
@@ -101,9 +149,9 @@ def test_graph_nodes_use_only_runtime_contracts_and_tokens() -> None:
     """除组合根外，Graph 只能读取 runtime 契约、令牌和轻量配置上下文。"""
 
     violations: list[str] = []
-    graph_root = CORE_ROOT / "travel_graph"
+    graph_root = PACKAGE_ROOT / "travel_graph"
     for path in graph_root.rglob("*.py"):
-        if path.name == "application.py":
+        if path.name == "application.py" or "api" in path.relative_to(graph_root).parts:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
@@ -114,9 +162,9 @@ def test_graph_nodes_use_only_runtime_contracts_and_tokens() -> None:
             else:
                 continue
             for module in modules:
-                if module.startswith("runtime.") and module not in {
-                    "runtime.contracts",
-                    "runtime.tokens",
+                if module.startswith("openzltravel.runtime.") and module not in {
+                    "openzltravel.runtime.contracts",
+                    "openzltravel.runtime.tokens",
                 }:
                     violations.append(f"{path}: {module}")
     assert violations == []
@@ -125,13 +173,13 @@ def test_graph_nodes_use_only_runtime_contracts_and_tokens() -> None:
 def test_graph_package_initializers_do_not_eagerly_load_workflow() -> None:
     """导入一个节点或 State 时，不应通过包入口隐式装载整张图。
 
-    工作流的唯一组合根是 ``travel_graph.application``；包入口保持轻量，能让学习者从
+    工作流的唯一组合根是 ``openzltravel.travel_graph.application``；包入口保持轻量，能让学习者从
     ``state``、``nodes`` 和 ``workflow`` 的显式导入看清依赖边界，也避免导入副作用。
     """
 
     package_files = [
-        CORE_ROOT / "travel_graph" / "__init__.py",
-        CORE_ROOT / "travel_graph" / "nodes" / "__init__.py",
+        PACKAGE_ROOT / "travel_graph" / "__init__.py",
+        PACKAGE_ROOT / "travel_graph" / "nodes" / "__init__.py",
     ]
     for path in package_files:
         source = path.read_text(encoding="utf-8")
@@ -141,8 +189,11 @@ def test_graph_package_initializers_do_not_eagerly_load_workflow() -> None:
             for node in ast.walk(tree)
             if isinstance(node, ast.ImportFrom) and node.module
         }
-        assert "travel_graph.workflow" not in imported_modules
-        assert not any(module.startswith("travel_graph.nodes.") for module in imported_modules)
+        assert "openzltravel.travel_graph.workflow" not in imported_modules
+        assert not any(
+            module.startswith("openzltravel.travel_graph.nodes.")
+            for module in imported_modules
+        )
 
 
 def test_langgraph_exports_exactly_one_travel_graph() -> None:
@@ -150,7 +201,7 @@ def test_langgraph_exports_exactly_one_travel_graph() -> None:
 
     config = json.loads((REPOSITORY_ROOT / "langgraph.json").read_text(encoding="utf-8"))
     assert config["graphs"] == {
-        "travel": "./backend/src/travel_graph/application.py:travel"
+        "travel": "./backend/src/openzltravel/travel_graph/application.py:travel"
     }
 
 
@@ -198,9 +249,9 @@ def test_removed_architecture_paths_do_not_return() -> None:
         BACKEND_ROOT / "database" / "app.sql",
         BACKEND_ROOT / "loadtests",
         BACKEND_ROOT / "scripts",
-        CORE_ROOT / "runtime" / "model_gateway.py",
-        CORE_ROOT / "travel_graph" / "agents.py",
-        CORE_ROOT / "travel_graph" / "prompts.py",
+        PACKAGE_ROOT / "runtime" / "model_gateway.py",
+        PACKAGE_ROOT / "travel_graph" / "agents.py",
+        PACKAGE_ROOT / "travel_graph" / "prompts.py",
     ]
     remaining_files = [
         str(path)

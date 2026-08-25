@@ -5,7 +5,7 @@ import asyncio
 import httpx
 import pytest
 
-from providers.base import ProviderError, ProviderRuntime
+from openzltravel.infrastructure.providers.base import ProviderError, ProviderRuntime
 
 
 @pytest.mark.asyncio

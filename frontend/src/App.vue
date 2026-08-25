@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import AssistantPage from "./pages/AssistantPage.vue";
+import AssistantPage from "./features/assistant/AssistantPage.vue";
 </script>
 
 <template>

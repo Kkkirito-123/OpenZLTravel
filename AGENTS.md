@@ -9,8 +9,8 @@
 ## 当前架构不变量
 
 - `langgraph.json` 只导出一个名为 `travel` 的根图。
-- `assistant/` 是独立 FastAPI + LangChain `create_agent` 服务；只负责对话、事实工具、筛选和签发工单。
-- `travel_graph/` 只负责已签名 `TravelOrder` 的确定性规划执行，不读取 Assistant 会话、Graph State 或 Checkpoint。
+- `openzltravel/assistant/` 是独立 FastAPI + LangChain `create_agent` 服务；只负责对话、事实工具、筛选和签发工单。
+- `openzltravel/travel_graph/` 只负责已签名 `TravelOrder` 的确定性规划执行，不读取 Assistant 会话、Graph State 或 Checkpoint。
 - Assistant Session Token 和 TravelOrder Token 使用共享 HMAC 配置；后端不信任前端自造事实或选择。
 - Assistant 查询的 POI、车票、酒店、天气事实必须带稳定 ID；提交工单前刷新时间敏感事实。
 - TravelGraph 只接受 `{"order_token":"..."}`；旧消息输入、快速表单输入和旧 interrupt 均拒绝。
@@ -24,33 +24,26 @@
 
 ```text
 langgraph.json
-  → backend/src/assistant/app.py
-  → backend/src/assistant/service.py
-  → backend/src/assistant/tools.py
-  → backend/src/runtime/tokens.py
-  → backend/src/travel_graph/application.py
-  → backend/src/travel_graph/state.py
-  → backend/src/travel_graph/workflow.py
-  → backend/src/travel_graph/nodes/
-  → backend/src/domain/
-  → backend/src/providers/ 与 backend/src/catalog/
-  → frontend/src/pages/AssistantPage.vue
-  → frontend/src/composables/useAssistantWorkspace.ts
-  → frontend/src/services/assistantGateway.ts
-  → frontend/src/services/planningGateway.ts
+  → backend/src/openzltravel/assistant/
+  → backend/src/openzltravel/travel_graph/
+  → backend/src/openzltravel/domain/
+  → backend/src/openzltravel/infrastructure/
+  → backend/src/openzltravel/runtime/
+  → frontend/src/features/assistant/
+  → frontend/src/features/planning/
+  → frontend/src/features/trips/
 ```
 
 ## 分层边界
 
 | 层 | 负责 | 不负责 |
 |---|---|---|
-| `domain/` | 模型、确定性规划、预算、事实校验 | 网络、环境变量、Graph 路由 |
-| `assistant/` | 自然语言、只读工具、会话快照、工单交接 | 写 Store、运行 TravelGraph |
-| `providers/` / `catalog/` | 地点、铁路、酒店、天气、路线事实 | 控制 Graph 路由、调用 Agent |
-| `runtime/` | 配置、Protocol、依赖装配、签名 Token | 承载业务状态 |
-| `travel_graph/` | 工单验证、规划、路线、预算、确认、保存 | 需求收集、事实发现、旧表单 |
-| `api/` | 匿名身份、历史行程和 Agent Server 授权 | 保存执行中会话 |
-| `frontend/` | 唯一 AI 页面、SSE、Thread/Run 交接与展示 | 解析自然语言、制造事实 |
+| `openzltravel/domain/` | 模型、确定性规划、预算、事实校验 | 网络、环境变量、Graph 路由 |
+| `openzltravel/assistant/` | 自然语言、只读工具、会话快照、工单交接 | 写 Store、运行 TravelGraph |
+| `openzltravel/infrastructure/` | 地点、铁路、酒店、天气、路线事实 | 控制 Graph 路由、调用 Agent |
+| `openzltravel/runtime/` | 配置、Protocol、身份、依赖装配、签名 Token | 承载业务状态 |
+| `openzltravel/travel_graph/` | 工单验证、规划、路线、预算、确认、保存及其 HTTP API | 需求收集、事实发现、旧表单 |
+| `frontend/src/features/` | Assistant、Planning、Trips 三块展示与交接 | 解析自然语言、制造事实 |
 
 ## 代码规则
 

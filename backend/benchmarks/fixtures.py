@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from domain.models import (
+from openzltravel.domain.models import (
     CandidateCatalog,
     City,
     DestinationCandidate,
@@ -15,14 +15,14 @@ from domain.models import (
     TravelRequirements,
     TravelSelection,
 )
-from providers.fakes import (
+from openzltravel.infrastructure.providers.fakes import (
     FakeCatalogProvider,
     FakeHotelProvider,
     FakeRailProvider,
     FakeRouteProvider,
     FakeWeatherProvider,
 )
-from runtime.contracts import AssistantDependencies, PlanningDependencies
+from openzltravel.runtime.contracts import AssistantDependencies, PlanningDependencies
 
 
 def assistant_dependencies(*, hotel_warning: str | None = None) -> AssistantDependencies:
