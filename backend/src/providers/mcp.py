@@ -40,7 +40,6 @@ class McpHttpClient:
         self._request_id = 0
         self._session_id: str | None = None
         self._initialized = False
-        self._legacy_direct = False
         self._initialize_lock = asyncio.Lock()
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
@@ -75,20 +74,14 @@ class McpHttpClient:
                 "params": {
                     "protocolVersion": self.protocol_version,
                     "capabilities": {},
-                    "clientInfo": {"name": "travel-workbench", "version": "1.0.0"},
+                    "clientInfo": {"name": "openzltravel", "version": "1.0.0"},
                 },
                 "id": request_id,
             },
             headers=self._request_headers(),
         )
-        if response.status_code in {404, 405}:
-            self._enable_legacy_direct()
-            return
         response.raise_for_status()
         payload = _response_payload(response, request_id)
-        if _method_not_found(payload):
-            self._enable_legacy_direct()
-            return
         if "error" in payload or not isinstance(payload.get("result"), dict):
             raise ProviderError("mcp_initialization_failed", "外部工具协议初始化失败")
         result = cast(dict[str, Any], payload["result"])
@@ -142,12 +135,9 @@ class McpHttpClient:
                 return
             self._session_id = None
             self._initialized = False
-            self._legacy_direct = False
             self.protocol_version = "2025-06-18"
 
     def _protocol_headers(self) -> dict[str, str]:
-        if self._legacy_direct:
-            return {}
         headers = {"MCP-Protocol-Version": self.protocol_version}
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
@@ -159,12 +149,6 @@ class McpHttpClient:
         headers = dict(self._base_headers)
         headers.update(self._protocol_headers())
         return headers
-
-    def _enable_legacy_direct(self) -> None:
-        # 只在服务端明确不支持 initialize 时，才兼容早期直接调用模式。
-        self._session_id = None
-        self._legacy_direct = True
-        self._initialized = True
 
     def _next_id(self) -> int:
         self._request_id += 1
@@ -198,11 +182,6 @@ def _sse_payloads(content: str) -> list[dict[str, Any]]:
         if isinstance(payload, dict):
             payloads.append(payload)
     return payloads
-
-
-def _method_not_found(payload: dict[str, Any]) -> bool:
-    error = payload.get("error")
-    return isinstance(error, dict) and error.get("code") == -32601
 
 
 def _tool_result(result: Any) -> Any:

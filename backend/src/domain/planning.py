@@ -1,11 +1,14 @@
-"""不依赖 LLM 的行程降级、预算和事实查找规则。
+"""可重现的行程、预算和事实规则。
 
-这里的函数必须保持可重现：同一份需求、事实和用户选择应得到同一份草稿/预算，便于
-Planner 超时后的降级、Checkpoint 重放以及单元测试比较结果。
+本模块是纯领域服务：输入是已验证的需求、事实和选择，输出是可序列化的草稿、预算或
+查询结果。它不访问网络、不读取环境变量，也不依赖 LangGraph，因此同一个工单在重试、
+Checkpoint 恢复和固定 Benchmark 中应得到一致结果。路线是唯一例外：路线数据属于实时
+Provider，必须由 ``travel_graph.nodes.planning`` 在顺序确定后查询。
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
 from domain.models import (
@@ -17,6 +20,7 @@ from domain.models import (
     Poi,
     RailChoice,
     RailOption,
+    SelectionBudgetPreview,
     TravelFacts,
     TravelRequirements,
     TravelSelection,
@@ -29,11 +33,12 @@ def deterministic_draft(
     requirements: TravelRequirements,
     facts: TravelFacts,
     selection: TravelSelection,
+    instruction: str | None = None,
 ) -> ItineraryDraft:
-    """当 PlannerAgent 不可用时，按稳定顺序生成可验证草稿。
+    """按节奏容量、车次时间和用户修改指令分配真实 POI。
 
-    该函数不是“第二个 Agent”：它不理解自然语言，只按 Catalog 顺序、节奏容量和
-    已验证的车次时间限制分配真实 POI，因此输出可以直接接受同一套事实边界校验。
+    该函数不做推荐，也不创建新的 POI。它只从工单携带的候选中排序和分日；如果用户
+    要求移动景点或减少某天安排，函数会重新计算后续草稿，确保路线和预算不会沿用旧结果。
     """
 
     if facts.catalog is None or requirements.destination is None:
@@ -41,7 +46,11 @@ def deterministic_draft(
     days_count = requirements.days_count
     capacities = [_PACE_CAPACITY[requirements.pace]] * days_count
     _apply_rail_time_limits(capacities, selection, facts)
-    attractions = facts.catalog.attractions[: sum(capacities)]
+    _apply_capacity_revision(capacities, instruction)
+    _ensure_required_capacity(capacities, len(facts.catalog.required_attraction_ids))
+    attractions = _apply_order_revision(
+        facts.catalog.attractions[: sum(capacities)], capacities, instruction
+    )
     buckets = _split_by_capacity(attractions, capacities)
     hotel_id = None if selection.self_arranged_hotel else selection.hotel_id
     days = [
@@ -55,17 +64,81 @@ def deterministic_draft(
     )
 
 
+def _apply_capacity_revision(capacities: list[int], instruction: str | None) -> None:
+    """处理“第 N 天少一个”等明确调整；总容量保持不变，避免漏掉已选景点。"""
+
+    if not instruction or len(capacities) < 2:
+        return
+    match = re.search(r"第\s*([一二三四五六七1-7])\s*天.*?(?:少安排|少放|少一个)", instruction)
+    if match is None:
+        return
+    target = _day_number(match.group(1)) - 1
+    if target < 0 or target >= len(capacities) or capacities[target] <= 0:
+        return
+    recipient = next(
+        (index for index in range(target + 1, len(capacities)) if capacities[index] < 4),
+        next((index for index in range(target) if capacities[index] < 4), None),
+    )
+    if recipient is None:
+        return
+    capacities[target] -= 1
+    capacities[recipient] += 1
+
+
+def _apply_order_revision(
+    attractions: list[Poi], capacities: list[int], instruction: str | None
+) -> list[Poi]:
+    """把明确点名的真实景点移动到指定日期，其余候选保持原有稳定顺序。"""
+
+    if not instruction:
+        return attractions
+    match = re.search(r"(.{1,30}?)放(?:到|在)?第\s*([一二三四五六七1-7])\s*天", instruction)
+    if match is None:
+        return attractions
+    day_index = _day_number(match.group(2)) - 1
+    if day_index < 0 or day_index >= len(capacities):
+        return attractions
+    phrase = match.group(1).strip("，。；、把将请 ")
+    poi = next(
+        (item for item in attractions if item.name in phrase or phrase.endswith(item.name)),
+        None,
+    )
+    if poi is None:
+        return attractions
+    buckets = _split_by_capacity(attractions, capacities)
+    source_index = next(
+        (
+            index
+            for index, bucket in enumerate(buckets)
+            if any(item.id == poi.id for item in bucket)
+        ),
+        None,
+    )
+    if source_index is None or source_index == day_index:
+        return attractions
+    source = buckets[source_index]
+    source.remove(poi)
+    target = buckets[day_index]
+    if len(target) >= 4:
+        source.append(target.pop())
+    target.insert(0, poi)
+    capacities[:] = [len(bucket) for bucket in buckets]
+    return [item for bucket in buckets for item in bucket]
+
+
+def _day_number(value: str) -> int:
+    return {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7}.get(
+        value, int(value) if value.isdigit() else 0
+    )
+
+
 def calculate_budget(
     requirements: TravelRequirements,
     facts: TravelFacts,
     selection: TravelSelection,
     draft: ItineraryDraft,
 ) -> BudgetBreakdown:
-    """优先使用真实报价，只对餐饮与门票给出明示经验估算。
-
-    缺少实时票价或房价时对应字段保持 ``None``；只有明确标为估算的餐饮和门票才会
-    进入汇总，避免把经验数字伪装成 Provider 事实。
-    """
+    """优先使用真实报价；未知票价/房价为 None，只有餐饮和门票使用明示估算。"""
 
     outbound = _rail_price(selection.outbound, facts.outbound_options)
     return_price = _rail_price(selection.return_trip, facts.return_options)
@@ -87,6 +160,37 @@ def calculate_budget(
         meals_estimated=round(meals, 2),
         tickets_estimated=round(tickets, 2),
         total_known=round(total, 2),
+    )
+
+
+def calculate_selection_budget_preview(
+    requirements: TravelRequirements,
+    facts: TravelFacts,
+    selection: TravelSelection,
+) -> SelectionBudgetPreview:
+    """仅使用已选报价和明示估算生成选择阶段预算。"""
+
+    outbound = _rail_price(selection.outbound, facts.outbound_options)
+    returning = _rail_price(selection.return_trip, facts.return_options)
+    rail_prices = [value for value in (outbound, returning) if value is not None]
+    intercity = sum(rail_prices) * requirements.travelers if rail_prices else None
+    hotel = _hotel_price(
+        _selected_hotel(selection, facts.hotel_options), requirements.days_count
+    )
+    meals = 80.0 * requirements.travelers * requirements.days_count
+    tickets = 60.0 * requirements.travelers * len(selection.attraction_ids)
+    total = sum(value for value in (intercity, hotel, meals, tickets) if value is not None)
+    remaining = requirements.budget - total if requirements.budget is not None else None
+    return SelectionBudgetPreview(
+        budget_limit=requirements.budget,
+        intercity_transport=intercity,
+        hotel=hotel,
+        meals_estimated=round(meals, 2),
+        tickets_estimated=round(tickets, 2),
+        estimated_total=round(total, 2),
+        estimated_remaining=round(remaining, 2) if remaining is not None else None,
+        unknown_costs=_selection_unknown_costs(requirements, facts, selection),
+        is_over_budget=remaining is not None and remaining < 0,
     )
 
 
@@ -118,6 +222,18 @@ def _split_by_capacity(pois: list[Poi], capacities: list[int]) -> list[list[Poi]
         buckets.append(pois[offset : offset + capacity])
         offset += capacity
     return buckets
+
+
+def _ensure_required_capacity(capacities: list[int], required_count: int) -> None:
+    """用户确认景点优先于节奏降级，但每天仍不超过领域模型的四项上限。"""
+
+    deficit = required_count - sum(capacities)
+    for index in sorted(range(len(capacities)), key=capacities.__getitem__, reverse=True):
+        added = min(max(0, 4 - capacities[index]), max(0, deficit))
+        capacities[index] += added
+        deficit -= added
+        if deficit <= 0:
+            return
 
 
 def _build_day(
@@ -176,6 +292,28 @@ def _hotel_price(hotel: HotelOption | None, days_count: int) -> float | None:
     if hotel.price_per_night is not None:
         return hotel.price_per_night * max(0, days_count - 1)
     return None
+
+
+def _selection_unknown_costs(
+    requirements: TravelRequirements,
+    facts: TravelFacts,
+    selection: TravelSelection,
+) -> list[str]:
+    unknown: list[str] = []
+    legs = (
+        ("去程车票", selection.outbound, selection.self_arranged_outbound, facts.outbound_options),
+        ("返程车票", selection.return_trip, selection.self_arranged_return, facts.return_options),
+    )
+    for label, choice, self_arranged, options in legs:
+        if self_arranged or choice is None or _rail_price(choice, options) is None:
+            unknown.append(label)
+    if requirements.days_count > 1:
+        selected_hotel = _selected_hotel(selection, facts.hotel_options)
+        hotel_price = _hotel_price(selected_hotel, requirements.days_count)
+        if selection.self_arranged_hotel or hotel_price is None:
+            unknown.append("住宿")
+    unknown.append("市内交通")
+    return unknown
 
 
 def _hour(value: str) -> int:

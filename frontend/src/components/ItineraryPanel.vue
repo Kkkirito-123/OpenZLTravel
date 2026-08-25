@@ -6,18 +6,29 @@ import {
   CloudSun,
   Clock3,
   ExternalLink,
+  ImageOff,
   Lightbulb,
   MapPin,
   Route,
+  TrainFront,
   Utensils,
   WalletCards,
 } from "@lucide/vue";
-import { computed } from "vue";
+import { computed, ref } from "vue";
 
-import type { ActivityDraft, DayDraft, PlaceSnapshot, TripRecord, WeatherDay } from "../types";
+import type {
+  ActivityDraft,
+  DayDraft,
+  PlaceSnapshot,
+  RailChoice,
+  RailOption,
+  TripRecord,
+  WeatherDay,
+} from "../types";
 
 const props = defineProps<{ trip: TripRecord; historical?: boolean }>();
 defineEmits<{ back: [] }>();
+const failedImages = ref(new Set<string>());
 
 const destination = computed(() => props.trip.city?.name
   ?? props.trip.requirements.destination
@@ -35,6 +46,33 @@ const budgetRows = computed(() => {
   ] as Array<[string, number | null | undefined]>;
 });
 const knownTotal = computed(() => props.trip.budget?.total_known);
+const railRows = computed(() => [
+  {
+    label: "去程",
+    option: props.trip.outbound_rail,
+    choice: props.trip.selection?.outbound,
+    selfArranged: props.trip.selection?.self_arranged_outbound,
+  },
+  {
+    label: "返程",
+    option: props.trip.return_rail,
+    choice: props.trip.selection?.return_trip,
+    selfArranged: props.trip.selection?.self_arranged_return,
+  },
+].filter((item) => item.option || item.selfArranged));
+const recommendationImages = computed(() => {
+  const index = props.trip.place_index ?? {};
+  const referenced = new Set<string>();
+  for (const day of props.trip.draft.days) {
+    for (const activity of day.activities) referenced.add(activity.poi_id);
+    for (const mealId of day.meal_ids ?? []) referenced.add(mealId);
+    if (day.hotel_id) referenced.add(day.hotel_id);
+  }
+  return [...referenced]
+    .map((id) => index[id])
+    .filter((place): place is PlaceSnapshot => Boolean(place && imageUrl(place.image_url)))
+    .slice(0, 8);
+});
 
 function dayDate(day: DayDraft): string {
   const start = props.trip.requirements.start_date;
@@ -52,8 +90,10 @@ function weatherFor(day: DayDraft): WeatherDay | undefined {
 function dateAtIndex(index: number): string | null {
   const start = props.trip.requirements.start_date;
   if (!start) return null;
-  const date = new Date(`${start}T00:00:00`);
-  date.setDate(date.getDate() + index - 1);
+  const [year, month, day] = start.split("-").map(Number);
+  if (!year || !month || !day) return null;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCDate(date.getUTCDate() + index - 1);
   return date.toISOString().slice(0, 10);
 }
 
@@ -77,8 +117,32 @@ function activityLocation(activity: ActivityDraft): string {
 }
 
 function mapUrl(place?: PlaceSnapshot): string | null {
-  if (!place?.latitude || !place.longitude) return null;
+  if (place?.latitude === null || place?.latitude === undefined
+    || place.longitude === null || place.longitude === undefined) return null;
   return `https://uri.amap.com/marker?position=${place.longitude},${place.latitude}&name=${encodeURIComponent(place.name)}`;
+}
+
+function imageUrl(value?: string | null): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function imageSource(value?: string | null): string {
+  const url = imageUrl(value);
+  return url ? new URL(url).hostname.replace(/^www\./, "") : "来源未标注";
+}
+
+function imageKey(place: PlaceSnapshot): string {
+  return `${place.fact_id}|${imageUrl(place.image_url) ?? ""}`;
+}
+
+function hideImage(place: PlaceSnapshot): void {
+  failedImages.value = new Set(failedImages.value).add(imageKey(place));
 }
 
 function mealText(day: DayDraft): string {
@@ -106,6 +170,19 @@ function weatherText(weather?: WeatherDay): string {
   return `${condition}${temperature}`;
 }
 
+function railSeat(option: RailOption, choice?: RailChoice | null): string {
+  return choice?.seat_type || option.seats?.[0]?.name || "席别待确认";
+}
+
+function railPrice(option: RailOption, choice?: RailChoice | null): number | null | undefined {
+  const selected = option.seats?.find((seat) => seat.name === choice?.seat_type);
+  return selected?.price ?? option.price_from;
+}
+
+function externalUrl(value?: string | null): string | null {
+  return imageUrl(value);
+}
+
 function dayRoutes(dayIndex: number): unknown[] {
   return props.trip.routes?.[String(dayIndex)] ?? props.trip.routes?.[dayIndex] ?? [];
 }
@@ -130,6 +207,73 @@ function dayRoutes(dayIndex: number): unknown[] {
         <span><WalletCards :size="15" />已知总额 {{ money(knownTotal) }}</span>
       </div>
     </header>
+
+    <section
+      v-if="recommendationImages.length"
+      class="recommendation-gallery"
+      aria-labelledby="recommendation-gallery-title"
+    >
+      <header class="recommendation-gallery-heading">
+        <div>
+          <p class="section-kicker">推荐图片</p>
+          <h3 id="recommendation-gallery-title">行程中的真实地点</h3>
+        </div>
+        <span>{{ recommendationImages.length }} 张</span>
+      </header>
+      <div class="recommendation-image-grid">
+        <figure v-for="place in recommendationImages" :key="place.fact_id">
+          <img
+            v-if="!failedImages.has(imageKey(place))"
+            class="recommendation-image"
+            :src="imageUrl(place.image_url) || undefined"
+            :alt="`${place.name}推荐图片`"
+            width="520"
+            height="320"
+            loading="lazy"
+            decoding="async"
+            referrerpolicy="no-referrer"
+            @error="hideImage(place)"
+          />
+          <div v-else class="recommendation-image-fallback" role="status">
+            <ImageOff :size="22" />
+            <span>推荐图片加载失败</span>
+          </div>
+          <figcaption>
+            <strong>{{ place.name }}</strong>
+            <a
+              :href="imageUrl(place.image_url) || undefined"
+              target="_blank"
+              rel="noreferrer"
+            ><ExternalLink :size="12" />图片来源：{{ imageSource(place.image_url) }}</a>
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section v-if="railRows.length" class="transport-panel" aria-labelledby="transport-title">
+      <div class="budget-heading"><TrainFront :size="18" /><h3 id="transport-title">城际交通</h3></div>
+      <div class="transport-grid">
+        <article v-for="row in railRows" :key="row.label" class="transport-card">
+          <span class="transport-label">{{ row.label }}</span>
+          <template v-if="row.option">
+            <div class="transport-title-row">
+              <strong>{{ row.option.train_code }}</strong>
+              <span>{{ money(railPrice(row.option, row.choice)) }}</span>
+            </div>
+            <p>{{ row.option.from_station }} → {{ row.option.to_station }}</p>
+            <p>{{ row.option.travel_date || "日期待确认" }} · {{ row.option.departure_time }} — {{ row.option.arrival_time }}</p>
+            <p>{{ railSeat(row.option, row.choice) }}</p>
+            <a
+              v-if="externalUrl(row.option.booking_url)"
+              :href="externalUrl(row.option.booking_url) || undefined"
+              target="_blank"
+              rel="noreferrer"
+            ><ExternalLink :size="12" />前往官方渠道确认</a>
+          </template>
+          <p v-else class="self-arranged-transport">由用户自行安排</p>
+        </article>
+      </div>
+    </section>
 
     <div class="itinerary-days">
       <article v-for="day in trip.draft.days" :key="day.day_index" class="day-card">

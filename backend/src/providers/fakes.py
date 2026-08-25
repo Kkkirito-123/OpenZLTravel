@@ -14,6 +14,7 @@ from domain.models import (
     Poi,
     RailOption,
     RailSeat,
+    ResolvedPlace,
     RouteSegment,
     TravelRequirements,
     WeatherDay,
@@ -44,6 +45,12 @@ class FakeCatalogProvider:
 
         self._ensure_available()
         return self.city
+
+    async def resolve_place(self, query: str) -> ResolvedPlace:
+        """默认把查询视为规范城市；需要 POI 的测试可注入专用 Gateway。"""
+
+        self._ensure_available()
+        return ResolvedPlace(query=query, city=self.city)
 
     async def search_candidates(self, city: City) -> CandidateCatalog:
         """返回预置 POI 候选池。"""

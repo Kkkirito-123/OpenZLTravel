@@ -29,7 +29,6 @@ EXPECTED_CHECKPOINT_TYPES = {
         "City",
         "Poi",
         "CandidateCatalog",
-        "DestinationCandidate",
         "RailSeat",
         "RailOption",
         "HotelOption",
@@ -40,10 +39,10 @@ EXPECTED_CHECKPOINT_TYPES = {
         "ActivityDraft",
         "DayDraft",
         "ItineraryDraft",
-        "ReviewIssue",
-        "ReviewResult",
         "TravelFacts",
         "BudgetBreakdown",
+        "FactStamp",
+        "TravelOrder",
     }
 } | {("travel_graph.state", "GraphNotice")}
 
@@ -101,7 +100,7 @@ async def test_strict_checkpoint_survives_interrupt_and_resume() -> None:
         dict[str, Any],
         await graph.ainvoke(cast(Any, _checkpoint_payload()), config),
     )
-    assert paused["__interrupt__"][0].value["kind"] == "clarification"
+    assert paused["__interrupt__"][0].value["kind"] == "route_preview"
     resumed = cast(
         dict[str, Any],
         await graph.ainvoke(
@@ -134,7 +133,7 @@ def test_langgraph_config_uses_custom_strict_checkpointer() -> None:
 def _ask_destination(_state: CheckpointState) -> dict[str, str]:
     """暂停并读取结构化恢复值。"""
 
-    value = interrupt({"kind": "clarification", "missing_fields": ["destination"]})
+    value = interrupt({"kind": "route_preview", "question": "确认测试路线？"})
     return {"answer": str(value["destination"])}
 
 

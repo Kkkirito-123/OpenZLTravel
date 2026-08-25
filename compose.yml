@@ -39,13 +39,8 @@ services:
       AUTH_SECRET: ${AUTH_SECRET:-openzltravel-local-development-secret-only}
       PROVIDER_MODE: ${PROVIDER_MODE:-live}
       RAIL_PROVIDER: ${RAIL_PROVIDER:-public}
-      # 应用容器使用只读 travelapp；PostgreSQL conninfo 避免 URL 特殊字符转义问题。
-      CATALOG_DATABASE_URL: "host=catalogdb port=5432 dbname=openzltravelcatalog user=travelapp password='${TRAVELAPP_POSTGRES_PASSWORD:?backend/.env.catalog.local 缺少 TRAVELAPP_POSTGRES_PASSWORD}'"
       PYTHONUTF8: "1"
       LANGGRAPH_STRICT_MSGPACK: "true"
-    depends_on:
-      catalogdb:
-        condition: service_healthy
     ports:
       - "127.0.0.1:2024:2024"
     healthcheck:
@@ -54,6 +49,49 @@ services:
         - python
         - -c
         - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2024/ok', timeout=3)"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  assistant:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: openzltravelassistant
+    restart: unless-stopped
+    init: true
+    command:
+      - python
+      - -m
+      - uvicorn
+      - assistant.app:app
+      - --app-dir
+      - /app/backend/src
+      - --host
+      - 0.0.0.0
+      - --port
+      - "2030"
+    env_file:
+      - ./backend/.env
+    environment:
+      AUTH_MODE: signed
+      AUTH_SECRET: ${AUTH_SECRET:-openzltravel-local-development-secret-only}
+      PROVIDER_MODE: ${PROVIDER_MODE:-live}
+      RAIL_PROVIDER: ${RAIL_PROVIDER:-public}
+      CATALOG_DATABASE_URL: "host=catalogdb port=5432 dbname=openzltravelcatalog user=travelapp password='${TRAVELAPP_POSTGRES_PASSWORD:?backend/.env.catalog.local 缺少 TRAVELAPP_POSTGRES_PASSWORD}'"
+      PYTHONUTF8: "1"
+    depends_on:
+      catalogdb:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:2030:2030"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2030/ok', timeout=3)"
       interval: 5s
       timeout: 5s
       retries: 30
@@ -69,8 +107,11 @@ services:
     environment:
       # 该地址只由 Vite 服务端代理使用，浏览器仍访问 127.0.0.1:5173。
       VITE_AGENT_SERVER_TARGET: http://agent:2024
+      VITE_ASSISTANT_SERVER_TARGET: http://assistant:2030
     depends_on:
       agent:
+        condition: service_healthy
+      assistant:
         condition: service_healthy
     ports:
       - "127.0.0.1:5173:5173"

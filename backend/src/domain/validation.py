@@ -1,4 +1,9 @@
-"""最终保存前的确定性事实与结构校验。"""
+"""最终保存前的确定性事实与结构校验。
+
+校验函数只接受领域模型，不信任 LLM、浏览器或 Provider 的原始字典。它负责确认选择的
+每个 ID 都存在于工单事实、席别和时间可安排、草稿中的景点来源合法、路线端点与草稿
+顺序一致。校验失败使用稳定的领域错误码，供 Assistant、Graph 和前端分别处理。
+"""
 
 from __future__ import annotations
 
@@ -18,11 +23,7 @@ def validate_selection(
     facts: TravelFacts,
     selection: TravelSelection,
 ) -> None:
-    """选择必须引用 Provider 返回的 ID，或显式声明自行安排。
-
-    这是第一个事实边界：用户从 interrupt 恢复的 JSON 仍然是不可信输入，只有命中当前
-    Provider 事实集合后，才允许进入 Planner。
-    """
+    """验证用户选择能否在当前事实和需求下进入规划。"""
 
     _validate_choice(
         selection.outbound.option_id if selection.outbound else None,
@@ -44,13 +45,79 @@ def validate_selection(
                 "hotel_not_required",
                 "一日游不接受酒店选择或自行安排住宿标志",
             )
-        return
-    _validate_choice(
-        selection.hotel_id,
-        selection.self_arranged_hotel,
-        {item.hotel_id for item in facts.hotel_options},
-        "hotel",
+    else:
+        _validate_choice(
+            selection.hotel_id,
+            selection.self_arranged_hotel,
+            {item.hotel_id for item in facts.hotel_options},
+            "hotel",
+        )
+    _validate_attractions(requirements, facts, selection)
+    _validate_schedule_capacity(requirements, facts, selection)
+
+
+def _validate_attractions(
+    requirements: TravelRequirements, facts: TravelFacts, selection: TravelSelection
+) -> None:
+    catalog = facts.catalog
+    if catalog is None:
+        raise TravelGraphError("catalog_missing", "景点选择前缺少地点目录")
+    selected = selection.attraction_ids
+    if not selected:
+        raise TravelGraphError("attraction_selection_required", "请至少选择一个景点")
+    if len(selected) != len(set(selected)):
+        raise TravelGraphError("duplicate_attraction_id", "景点选择不能包含重复项")
+    capacity = requirements.days_count * 4
+    if len(selected) > capacity:
+        raise TravelGraphError("attraction_capacity_exceeded", f"最多选择 {capacity} 个景点")
+    known = {item.id for item in catalog.attractions}
+    if unknown := sorted(set(selected) - known):
+        raise FactBoundaryError("unknown_attraction_id", f"不存在的景点: {', '.join(unknown)}")
+    if missing := sorted(set(catalog.required_attraction_ids) - set(selected)):
+        raise FactBoundaryError("required_attraction_missing", f"必去项缺失: {', '.join(missing)}")
+
+
+def _validate_schedule_capacity(
+    requirements: TravelRequirements,
+    facts: TravelFacts,
+    selection: TravelSelection,
+) -> None:
+    capacity = requirements.days_count * 4
+    first_day = _selected_option(selection.outbound, facts.outbound_options)
+    last_day = _selected_option(selection.return_trip, facts.return_options)
+    if first_day is not None:
+        capacity -= 4 - _day_capacity(_minutes(first_day.arrival_time), 18 * 60)
+    if last_day is not None:
+        capacity -= 4 - _day_capacity(9 * 60, _minutes(last_day.departure_time))
+    if first_day is not None and last_day is not None and requirements.days_count == 1:
+        capacity = _day_capacity(
+            _minutes(first_day.arrival_time), _minutes(last_day.departure_time)
+        )
+    if len(selection.attraction_ids) > capacity:
+        raise TravelGraphError(
+            "attraction_schedule_capacity",
+            f"当前车次最多安排 {max(capacity, 0)} 个景点",
+        )
+
+
+def _day_capacity(start_minutes: int, end_minutes: int) -> int:
+    if end_minutes - start_minutes <= 120:
+        return 0
+    return min(4, (end_minutes - start_minutes) // 120)
+
+
+def _selected_option(choice: RailChoice | None, options: list[RailOption]) -> RailOption | None:
+    return next(
+        (item for item in options if choice and item.option_id == choice.option_id), None
     )
+
+
+def _minutes(value: str) -> int:
+    try:
+        hour, minute = map(int, value.split(":"))
+        return hour * 60 + minute
+    except (TypeError, ValueError):
+        return 0
 
 
 def validate_draft(
@@ -59,11 +126,7 @@ def validate_draft(
     selection: TravelSelection,
     draft: ItineraryDraft,
 ) -> None:
-    """验证日期、用户选择和所有事实 ID，阻止 Agent 编造或替换事实。
-
-    Planner 输出即使符合 Pydantic 结构，也可能引用不存在的 POI 或另一家酒店；因此
-    结构校验和事实校验必须分开执行，且保存节点只能位于本函数之后。
-    """
+    """验证确定性草稿没有超出景点、天数、时间和住宿约束。"""
 
     if len(draft.days) != requirements.days_count:
         raise TravelGraphError("invalid_day_count", "行程天数与用户需求不一致")
@@ -73,6 +136,8 @@ def validate_draft(
     _validate_draft_hotels(requirements, selection, draft)
     if facts.catalog is None:
         raise TravelGraphError("catalog_missing", "最终校验缺少地点目录")
+    if set(facts.catalog.required_attraction_ids) != set(selection.attraction_ids):
+        raise FactBoundaryError("selection_catalog_mismatch", "景点选择状态不一致")
     attraction_ids = {item.id for item in facts.catalog.attractions}
     restaurant_ids = {item.id for item in facts.catalog.restaurants}
     hotel_ids = {
@@ -92,7 +157,15 @@ def validate_draft(
     if unknown:
         raise FactBoundaryError(
             "unknown_fact_id",
-            f"Agent 引用了不存在的事实 ID: {', '.join(unknown)}",
+            f"规划结果引用了不存在的事实 ID: {', '.join(unknown)}",
+        )
+    missing_required = sorted(
+        set(facts.catalog.required_attraction_ids) - referenced_attractions
+    )
+    if missing_required:
+        raise FactBoundaryError(
+            "requested_place_missing",
+            f"行程遗漏了用户确认的必去地点: {', '.join(missing_required)}",
         )
 
 
@@ -101,8 +174,6 @@ def _validate_draft_hotels(
     selection: TravelSelection,
     draft: ItineraryDraft,
 ) -> None:
-    """酒店安排必须逐晚服从用户选择，最后一天和一日游都不能虚构额外住宿。"""
-
     for day in draft.days:
         requires_night = requirements.days_count > 1 and day.day_index < requirements.days_count
         expected_hotel = (
@@ -117,12 +188,8 @@ def _validate_draft_hotels(
             )
 
 
-def validate_routes(facts: TravelFacts) -> None:
-    """路线端点也必须属于同一个真实 POI 候选池。
-
-    路线由独立 Provider 产生，不能因为端点看起来像字符串就默认可信；未知端点会在
-    Store 写入前失败，避免历史行程保存无法解释的路线事实。
-    """
+def validate_routes(facts: TravelFacts, draft: ItineraryDraft) -> None:
+    """验证路线只连接相邻真实 POI，并与每日草稿顺序保持一致。"""
 
     if facts.catalog is None:
         return
@@ -141,6 +208,21 @@ def validate_routes(facts: TravelFacts) -> None:
             "unknown_route_endpoint",
             f"路线引用了不存在的 POI ID: {', '.join(unknown)}",
         )
+    day_pairs = {
+        day.day_index: list(zip(
+            [activity.poi_id for activity in day.activities],
+            [activity.poi_id for activity in day.activities][1:],
+            strict=False,
+        ))
+        for day in draft.days
+    }
+    for day_index, routes in facts.routes.items():
+        actual = [(route.from_poi_id, route.to_poi_id) for route in routes]
+        if actual and actual != day_pairs.get(day_index, []):
+            raise FactBoundaryError(
+                "route_order_mismatch",
+                f"第 {day_index} 天路线未按相邻景点逐段连接",
+            )
 
 
 def _validate_choice(

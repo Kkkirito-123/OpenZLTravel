@@ -52,6 +52,7 @@ try {
             if ($LASTEXITCODE -ne 0) { throw "Docker 服务启动失败。" }
             Write-Host "旅行工作台：http://127.0.0.1:5173"
             Write-Host "LangGraph Agent Server：http://127.0.0.1:2024"
+            Write-Host "旅行交流助手：http://127.0.0.1:2030"
         }
         "down" {
             # 故意不使用 --volumes，保留 openzltravelcatalogdata 中的地点目录。

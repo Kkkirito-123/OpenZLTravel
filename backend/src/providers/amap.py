@@ -3,29 +3,78 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from collections.abc import Sequence
 from datetime import date
 from typing import Any, Literal, cast
 
 import httpx
 
-from domain.models import CandidateCatalog, City, Poi, RouteSegment, WeatherDay
+from domain.models import (
+    CandidateCatalog,
+    City,
+    Poi,
+    ResolvedPlace,
+    RouteSegment,
+    WeatherDay,
+)
 
-from .base import ProviderError, ProviderRuntime, stable_fact_id, stable_key
+from .amap_matching import (
+    best_poi_match,
+    best_query_match,
+    city_from_geocode,
+    is_administrative_query,
+    poi_from_item,
+)
+from .base import ProviderError, ProviderRuntime, stable_key
 from .geo import (
     amap_location,
     dict_items,
     first_mapping,
-    http_url,
     mapping,
-    parse_location,
     parse_polyline,
     route_metrics,
     text,
 )
 
 PoiCategory = Literal["attraction", "restaurant", "hotel"]
+
+
+def _enrichment_candidates(catalog: CandidateCatalog, limit: int) -> list[Poi]:
+    """按首屏配额选择需要补充展示字段的 POI。"""
+
+    candidates = [item for item in catalog.all if not item.address or not item.image_url]
+    if limit <= 4:
+        return sorted(
+            candidates,
+            key=lambda item: (item.category != "hotel", item.name),
+        )[: max(0, limit)]
+
+    categories = ("attraction", "hotel", "restaurant")
+    by_category = {
+        category: sorted(
+            (item for item in candidates if item.category == category),
+            key=lambda item: item.name,
+        )
+        for category in categories
+    }
+    quotas = {
+        "attraction": min(12, limit),
+        "hotel": min(8, max(0, limit - 12)),
+        "restaurant": min(4, max(0, limit - 20)),
+    }
+    selected = [
+        item
+        for category in categories
+        for item in by_category[category][: quotas[category]]
+    ]
+    selected_ids = {item.id for item in selected}
+    if len(selected) < limit:
+        selected.extend(
+            item
+            for item in sorted(candidates, key=lambda value: (value.category, value.name))
+            if item.id not in selected_ids
+        )
+    return selected[:limit]
 
 
 class AmapClient:
@@ -51,20 +100,21 @@ class AmapClient:
     async def resolve_city(self, destination: str) -> City:
         """用地理编码确认城市和 WGS-84 中心点。"""
 
-        payload = await self._get("/geocode/geo", {"address": destination}, ttl_seconds=86400)
-        geocode = first_mapping(payload.get("geocodes"))
-        if geocode is None:
-            raise ProviderError("city_not_found", f"无法确认目的地“{destination}”")
-        location = parse_location(geocode.get("location"), from_amap=True)
-        if location is None:
-            raise ProviderError("city_not_found", "高德城市结果缺少有效坐标")
-        latitude, longitude = location
-        return City(
-            name=text(geocode.get("city")) or text(geocode.get("district")) or destination,
-            adcode=text(geocode.get("adcode")) or None,
-            latitude=latitude,
-            longitude=longitude,
-        )
+        geocode = await self._geocode(destination)
+        return city_from_geocode(destination, geocode)
+
+    async def resolve_place(self, query: str) -> ResolvedPlace:
+        """区分规范城市和具体地点；非行政区输入必须命中 POI，不能静默当成城市。"""
+
+        geocode = await self._geocode(query)
+        city = city_from_geocode(query, geocode)
+        if is_administrative_query(query, geocode):
+            return ResolvedPlace(query=query, city=city)
+        candidates = await self._search(city, query, "attraction", 5)
+        poi = best_query_match(query, candidates)
+        if poi is None:
+            raise ProviderError("place_not_found", f"无法确认具体地点“{query}”")
+        return ResolvedPlace(query=query, city=city, poi=poi)
 
     async def search_candidates(self, city: City) -> CandidateCatalog:
         """并行读取三类 POI；餐饮/酒店失败可为空，景点失败则拒绝规划。"""
@@ -89,23 +139,15 @@ class AmapClient:
         )
 
     async def enrich_catalog(
-        self, city: City, catalog: CandidateCatalog, *, limit: int = 16
+        self, city: City, catalog: CandidateCatalog, *, limit: int = 24
     ) -> CandidateCatalog:
-        """给本地 OSM 目录补充缺失的地址和图片。
+        """用高德同名匹配补齐首屏图片和地址；失败时保留原事实，不猜测。"""
 
-        本地目录的坐标和稳定 ID 是权威事实，但 OSM 中不少地点没有 ``addr:*``
-        或 ``image`` 标签。这里只针对缺少展示信息的少量候选调用高德关键词搜索，
-        找到同名地点后补齐地址和图片；匹配失败或网络失败时保留原始目录，绝不
-        用猜测内容覆盖真实字段。
-        """
-
-        # 酒店选择卡片最依赖地址和图片，而且本地 Catalog 的 ``all`` 顺序是
-        # 景点 → 餐饮 → 酒店。如果直接截取前 ``limit`` 个，酒店很容易永远
-        # 排在队列之外。因此先处理酒店，再处理景点和餐饮。
-        missing = sorted(
-            (item for item in catalog.all if not item.address or not item.image_url),
-            key=lambda item: (item.category != "hotel", item.name),
-        )[: max(0, limit)]
+        # 首屏工作台先展示景点，不能让酒店候选耗尽补图名额。默认配额覆盖
+        # 桌面端景点首屏 12 张、酒店首屏 8 张和少量餐饮；实际不足时再由
+        # 其他类别补足。显式传入很小的 limit 时保留旧的“酒店优先”行为，
+        # 兼容只针对酒店展示字段的调用方。
+        missing = _enrichment_candidates(catalog, limit)
         if not missing:
             return catalog
 
@@ -128,7 +170,7 @@ class AmapClient:
                         candidates = await self._search(city, item.name, item.category, 5)
                 except Exception:
                     return item
-            match = _best_poi_match(item, candidates)
+            match = best_poi_match(item, candidates)
             if match is None:
                 return item
             return item.model_copy(
@@ -231,6 +273,15 @@ class AmapClient:
         if self._owns_http:
             await self.http.aclose()
 
+    async def _geocode(self, query: str) -> dict[str, Any]:
+        """读取单个地理编码结果，供城市与地点解析共享。"""
+
+        payload = await self._get("/geocode/geo", {"address": query}, ttl_seconds=86400)
+        geocode = first_mapping(payload.get("geocodes"))
+        if geocode is None:
+            raise ProviderError("place_not_found", f"无法确认地点“{query}”")
+        return geocode
+
     async def _search(
         self, city: City, keyword: str, category: PoiCategory, limit: int
     ) -> list[Poi]:
@@ -248,7 +299,7 @@ class AmapClient:
         return [
             poi
             for item in dict_items(payload.get("pois"))
-            if (poi := _poi(item, category)) is not None
+            if (poi := poi_from_item(item, category)) is not None
         ]
 
     async def _get(
@@ -275,68 +326,9 @@ class AmapClient:
 
 
 def _amap_city(city: City) -> str:
-    """在高德 HTTP 边界把 Catalog 的 12 位国标 adcode 转为高德使用的 6 位编码。
-
-    领域层保留完整行政区编码，避免丢失层级信息；只有请求高德天气、POI 或公交接口时
-    才截取前 6 位。没有编码时继续使用城市名称，不能在领域模型中原地修改事实。
-    """
+    """仅在高德 HTTP 边界把 12 位 adcode 转为 6 位；领域事实保持不变。"""
 
     return city.adcode[:6] if city.adcode else city.name
-
-
-def _poi(item: dict[str, Any], category: PoiCategory) -> Poi | None:
-    location = parse_location(item.get("location"), from_amap=True)
-    raw_id, name = text(item.get("id")), text(item.get("name"))
-    if location is None or not raw_id or not name:
-        return None
-    latitude, longitude = location
-    type_name = text(item.get("type"))
-    return Poi(
-        id=stable_fact_id("poi-amap", raw_id),
-        name=name,
-        address=text(item.get("address")),
-        category=category,
-        latitude=latitude,
-        longitude=longitude,
-        type_name=type_name,
-        image_url=http_url(item.get("photos")),
-        tags=[value for value in type_name.split(";") if value],
-    )
-
-
-def _best_poi_match(target: Poi, candidates: list[Poi]) -> Poi | None:
-    """在高德结果中选择同类、同名或坐标最近的候选。"""
-
-    same_category = [item for item in candidates if item.category == target.category]
-    if not same_category:
-        return None
-    target_name = _normalize_name(target.name)
-    exact = [item for item in same_category if _normalize_name(item.name) == target_name]
-    if exact:
-        return exact[0]
-    named = [
-        item
-        for item in same_category
-        if target_name in _normalize_name(item.name)
-        or _normalize_name(item.name) in target_name
-    ]
-    if named:
-        return min(named, key=lambda item: _distance(target, item))
-    nearest = min(same_category, key=lambda item: _distance(target, item))
-    return nearest if _distance(target, nearest) <= 0.03 else None
-
-
-def _normalize_name(value: str) -> str:
-    """去掉常见行政区和酒店后缀，提升跨 Provider 名称匹配率。"""
-
-    normalized = re.sub(r"[市区县酒店宾馆旅馆度假村]+$", "", value.strip())
-    return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", normalized).casefold()
-
-
-def _distance(left: Poi, right: Poi) -> float:
-    """使用经纬度平方距离做本地候选排序，不把它当作路线距离。"""
-
-    return (left.latitude - right.latitude) ** 2 + (left.longitude - right.longitude) ** 2
 
 
 def _weather_day(

@@ -151,14 +151,14 @@ async def scope_store(
     ctx: Auth.types.AuthContext,
     value: dict[str, Any],
 ) -> bool:
-    """把所有 Store 操作收敛到 ``(user_id, trips|preferences)`` 命名空间。"""
+    """把所有 Store 操作收敛到最终行程命名空间。"""
 
     namespace = tuple(value.get("namespace") or ())
     if namespace and namespace[0] == ctx.user.identity:
         scoped = namespace
     else:
         scoped = (ctx.user.identity, *namespace)
-    if len(scoped) < 2 or scoped[1] not in {"trips", "preferences"}:
+    if len(scoped) < 2 or scoped[1] != "trips":
         return False
     value["namespace"] = scoped
     return True

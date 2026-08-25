@@ -1,21 +1,11 @@
-"""应用组合根：把配置、模型网关和具体 Provider 装配成 TravelGraph 依赖。
-
-只有本模块知道各个实现类的构造方式。领域模型、图节点和 Provider 解析器都不读取全局
-容器，从而避免隐式依赖和循环导入；测试可以直接构造 ``TravelDependencies`` 注入图。
-"""
+"""Assistant 与 TravelGraph 的最小依赖装配根。"""
 
 from __future__ import annotations
 
 from typing import Literal
 
-from catalog import CatalogTool, PostgresCatalogRepository
-from domain.models import (
-    CandidateCatalog,
-    City,
-    DestinationCandidate,
-    HotelOption,
-    Poi,
-)
+from catalog.tool import CatalogTool, PostgresCatalogRepository
+from domain.models import CandidateCatalog, City, DestinationCandidate, HotelOption, Poi
 from providers.amap import AmapClient
 from providers.base import stable_fact_id
 from providers.fakes import (
@@ -34,90 +24,105 @@ from providers.rail_12306 import Public12306Client
 from providers.routes import RouteProvider as LiveRouteProvider
 from providers.weather import OpenMeteoClient
 from providers.weather import WeatherProvider as LiveWeatherProvider
-from runtime.config import Settings, get_settings
-from runtime.contracts import StructuredModel, TravelDependencies
-from runtime.model_gateway import build_model_bundle
+from runtime.config import ConfigurationError, Settings, get_settings
+from runtime.contracts import AssistantDependencies, PlanningDependencies
 
-_default_dependencies: TravelDependencies | None = None
+_assistant_dependencies: AssistantDependencies | None = None
+_planning_dependencies: PlanningDependencies | None = None
 
 
-def get_dependencies(settings: Settings | None = None) -> TravelDependencies:
-    """构造图的唯一依赖容器；默认配置在进程内复用连接池。
+def get_assistant_dependencies(settings: Settings | None = None) -> AssistantDependencies:
+    """装配交流助手的目录、铁路、酒店和天气只读工具。"""
 
-    新手可以把这里理解为“装配线”：先读配置，再选择 Fake 或 Live Provider，最后把
-    完整容器交给 ``build_travel_graph``。业务节点不应在运行过程中自行 new Provider。
-    """
-
-    global _default_dependencies
+    global _assistant_dependencies
     if settings is not None:
-        return _build_dependencies(settings)
-    if _default_dependencies is None:
-        _default_dependencies = _build_dependencies(get_settings())
-    return _default_dependencies
+        return _build_assistant_dependencies(settings)
+    if _assistant_dependencies is None:
+        _assistant_dependencies = _build_assistant_dependencies(get_settings())
+    return _assistant_dependencies
+
+
+def get_planning_dependencies(settings: Settings | None = None) -> PlanningDependencies:
+    """装配 TravelGraph 唯一需要的路线 Provider。"""
+
+    global _planning_dependencies
+    if settings is not None:
+        return _build_planning_dependencies(settings)
+    if _planning_dependencies is None:
+        _planning_dependencies = _build_planning_dependencies(get_settings())
+    return _planning_dependencies
 
 
 def reset_dependencies() -> None:
-    """清理默认容器引用，仅供测试重新装配环境变量。"""
+    """清理进程级容器引用，仅供测试重新装配配置。"""
 
-    global _default_dependencies
-    _default_dependencies = None
+    global _assistant_dependencies, _planning_dependencies
+    _assistant_dependencies = None
+    _planning_dependencies = None
 
 
-def _build_dependencies(settings: Settings) -> TravelDependencies:
-    """根据运行模式组装一份自洽依赖，确保 Fake 与 Live 具有相同 Protocol。"""
-
-    models = build_model_bundle(settings)
+def _build_assistant_dependencies(settings: Settings) -> AssistantDependencies:
     if settings.provider_mode == "fake":
-        return _fake_dependencies(models.requirement, models.planner, models.review)
+        city = City(name="杭州", adcode="330100", latitude=30.2741, longitude=120.1551)
+        catalog = _fake_catalog()
+        destinations = [
+            DestinationCandidate(
+                candidate_id=stable_fact_id("destination", "330100"),
+                city=city,
+                score=0.95,
+                reasons=["景点、餐饮和住宿覆盖充足", "离线开发数据"],
+                attraction_count=len(catalog.attractions),
+                restaurant_count=len(catalog.restaurants),
+                hotel_count=len(catalog.hotels),
+            )
+        ]
+        return AssistantDependencies(
+            catalog=FakeCatalogProvider(city, catalog, destinations),
+            rail=FakeRailProvider(),
+            hotels=FakeHotelProvider(_fake_hotels(catalog)),
+            weather=FakeWeatherProvider(),
+        )
 
+    if settings.catalog_database_url is None:
+        raise ConfigurationError("Assistant 的 PROVIDER_MODE=live 要求 CATALOG_DATABASE_URL")
     amap = _amap_client(settings)
     repository = PostgresCatalogRepository(settings.catalog_database_url or "")
-    catalog = CatalogTool(
-        repository,
-        amap if settings.allow_amap_fallback else None,
+    catalog_tool = CatalogTool(repository, amap if settings.allow_amap_fallback else None)
+    weather = LiveWeatherProvider(
+        OpenMeteoClient(
+            base_url=settings.open_meteo_base_url,
+            timeout_seconds=settings.open_meteo_timeout_seconds,
+        ),
+        amap,
     )
-    open_meteo = OpenMeteoClient(
-        base_url=settings.open_meteo_base_url,
-        timeout_seconds=settings.open_meteo_timeout_seconds,
-    )
-    # 这里的 Live* 别名用于区分“具体适配器”和 runtime.contracts 中的 Protocol。
-    # 容器负责选择实现，图节点只看到 Protocol，不需要知道 Provider 的构造细节。
-    weather = LiveWeatherProvider(open_meteo, amap)
+    rail_client: RailClient
     if settings.rail_provider == "public":
-        # 默认直接访问 12306 公共查询接口，不要求用户另起一个本地 MCP 服务。
-        rail_client: RailClient = Public12306Client(
-            timeout_seconds=settings.rail_mcp_timeout_seconds
-        )
+        rail_client = Public12306Client(timeout_seconds=settings.rail_mcp_timeout_seconds)
     else:
-        # 需要接入自建或第三方铁路 MCP 时，只切换 RAIL_PROVIDER=mcp。
         rail_client = McpHttpClient(
             settings.rail_mcp_url,
             timeout_seconds=settings.rail_mcp_timeout_seconds,
             bearer_token=settings.rail_mcp_token or "",
         )
-    rail = LiveRailProvider(
-        rail_client,
-        timeout_seconds=settings.rail_mcp_timeout_seconds,
-    )
-    rollinggo = RollingGoHotelClient(
-        settings.rollinggo_mcp_url,
-        settings.rollinggo_api_key,
-        timeout_seconds=settings.rollinggo_timeout_seconds,
-    )
-    hotels = LiveHotelProvider(
-        rollinggo,
-        timeout_seconds=settings.rollinggo_timeout_seconds,
-    )
-    return TravelDependencies(
-        catalog=catalog,
-        rail=rail,
-        hotels=hotels,
+    return AssistantDependencies(
+        catalog=catalog_tool,
+        rail=LiveRailProvider(rail_client, timeout_seconds=settings.rail_mcp_timeout_seconds),
+        hotels=LiveHotelProvider(
+            RollingGoHotelClient(
+                settings.rollinggo_mcp_url,
+                settings.rollinggo_api_key,
+                timeout_seconds=settings.rollinggo_timeout_seconds,
+            ),
+            timeout_seconds=settings.rollinggo_timeout_seconds,
+        ),
         weather=weather,
-        routes=LiveRouteProvider(amap),
-        requirement_model=models.requirement,
-        planner_model=models.planner,
-        review_model=models.review,
     )
+
+
+def _build_planning_dependencies(settings: Settings) -> PlanningDependencies:
+    if settings.provider_mode == "fake":
+        return PlanningDependencies(routes=FakeRouteProvider())
+    return PlanningDependencies(routes=LiveRouteProvider(_amap_client(settings)))
 
 
 def _amap_client(settings: Settings) -> AmapClient | None:
@@ -127,38 +132,6 @@ def _amap_client(settings: Settings) -> AmapClient | None:
         settings.amap_api_key,
         base_url=settings.amap_base_url,
         timeout_seconds=settings.amap_timeout_seconds,
-    )
-
-
-def _fake_dependencies(
-    requirement_model: StructuredModel | None,
-    planner_model: StructuredModel | None,
-    review_model: StructuredModel | None,
-) -> TravelDependencies:
-    """构造不需要网络、数据库或模型密钥的完整离线依赖。"""
-
-    city = City(name="杭州", adcode="330100", latitude=30.2741, longitude=120.1551)
-    catalog = _fake_catalog()
-    destinations = [
-        DestinationCandidate(
-            candidate_id=stable_fact_id("destination", "330100"),
-            city=city,
-            score=0.95,
-            reasons=["景点、餐饮和住宿覆盖充足", "离线开发数据"],
-            attraction_count=len(catalog.attractions),
-            restaurant_count=len(catalog.restaurants),
-            hotel_count=len(catalog.hotels),
-        )
-    ]
-    return TravelDependencies(
-        catalog=FakeCatalogProvider(city, catalog, destinations),
-        rail=FakeRailProvider(),
-        hotels=FakeHotelProvider(_fake_hotels(catalog)),
-        weather=FakeWeatherProvider(),
-        routes=FakeRouteProvider(),
-        requirement_model=requirement_model,
-        planner_model=planner_model,
-        review_model=review_model,
     )
 
 

@@ -42,6 +42,167 @@
   border-radius: var(--radius-sm);
 }
 
+.recommendation-gallery {
+  padding: 18px 24px 20px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.recommendation-gallery-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.recommendation-gallery-heading h3,
+.recommendation-gallery-heading p {
+  margin-bottom: 0;
+}
+
+.recommendation-gallery-heading > span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.recommendation-image-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 12px;
+}
+
+.recommendation-image-grid figure {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.recommendation-image,
+.recommendation-image-fallback {
+  width: 100%;
+  aspect-ratio: 13 / 8;
+}
+
+.recommendation-image {
+  object-fit: cover;
+  background: var(--surface-strong);
+}
+
+.recommendation-image-fallback {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  background: var(--surface-strong);
+}
+
+.recommendation-image-grid figcaption {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px 10px;
+}
+
+.recommendation-image-grid figcaption strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recommendation-image-grid figcaption a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  color: var(--accent);
+  font-size: 11px;
+  text-decoration: none;
+}
+
+.recommendation-image-grid figcaption a:hover {
+  text-decoration: underline;
+}
+
+.transport-panel {
+  padding: 18px 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.transport-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  gap: 12px;
+}
+
+.transport-card {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.transport-label {
+  width: fit-content;
+  padding: 3px 7px;
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--accent-soft);
+  border-radius: 999px;
+}
+
+.transport-title-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.transport-title-row strong {
+  font-size: 18px;
+}
+
+.transport-title-row span {
+  color: var(--brand-strong);
+  font-weight: 700;
+}
+
+.transport-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.transport-card a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  min-height: 44px;
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.transport-card a:hover {
+  text-decoration: underline;
+}
+
+.transport-card .self-arranged-transport {
+  color: var(--ink);
+  font-weight: 650;
+}
+
 .itinerary-days {
   display: grid;
 }

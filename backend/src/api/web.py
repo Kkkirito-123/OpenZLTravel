@@ -1,4 +1,8 @@
-"""挂载到 LangGraph Agent Server 的最小 FastAPI 自定义应用。"""
+"""挂载到 LangGraph Agent Server 的最小 FastAPI 自定义应用。
+
+平台自身负责 Thread、Run、Checkpoint 和 Store；本模块只补充匿名身份、历史行程读取
+和删除接口。它不接受旅行需求、不创建规划状态，也不替代 Graph 的工单验证节点。
+"""
 
 from __future__ import annotations
 
@@ -30,7 +34,7 @@ class AnonymousAuthResponse(BaseModel):
     expires_at: str
 
 
-def create_app() -> FastAPI:
+def create_app() -> FastAPI:  # noqa: C901 - routes intentionally share one auth boundary
     """创建只包含身份和行程历史接口的自定义应用。
 
     LangGraph Agent Server 已提供 Thread、Run、Checkpoint 和 Store 的平台接口，因此这里
@@ -44,7 +48,6 @@ def create_app() -> FastAPI:
         redoc_url=None,
         openapi_url=None,
     )
-
     @application.post("/api/auth/anonymous", response_model=AnonymousAuthResponse)
     async def issue_anonymous_identity(
         request: Request,

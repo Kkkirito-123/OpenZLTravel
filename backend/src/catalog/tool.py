@@ -10,9 +10,9 @@ from psycopg import Error as PsycopgError
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
-from catalog.enrichment import enrich_catalog
+from catalog.enrichment import enrich_catalog, enrich_resolved_place
 from catalog.postgres_compat import execute_sync
-from catalog.queries import CITY_SQL, DESTINATION_SQL, POI_SQL
+from catalog.queries import CITY_SQL, DESTINATION_SQL, PLACE_SQL, POI_SQL
 from catalog.ranking import (
     DestinationProfile,
     destination_profile,
@@ -25,6 +25,7 @@ from domain.models import (
     City,
     DestinationCandidate,
     Poi,
+    ResolvedPlace,
 )
 from providers.base import (
     AsyncTTLCache,
@@ -44,6 +45,9 @@ class CatalogRepository(Protocol):
     async def search_candidates(self, city: City) -> CandidateCatalog:
         """返回城市周边的三类 POI。"""
 
+    async def resolve_place(self, query: str) -> ResolvedPlace:
+        """从本地目录精确解析景点及其所属城市。"""
+
     async def destination_profiles(
         self, origin: str, region: str
     ) -> list[DestinationProfile]:
@@ -56,18 +60,15 @@ class CatalogFallback(Protocol):
     async def resolve_city(self, destination: str) -> City:
         """通过高德确认城市。"""
 
+    async def resolve_place(self, query: str) -> ResolvedPlace:
+        """通过高德区分城市与具体地点。"""
+
     async def search_candidates(self, city: City) -> CandidateCatalog:
         """通过高德查询真实 POI。"""
 
 
 class PostgresCatalogRepository:
-    """使用有界连接池读取 PostGIS 地点目录。
-
-    Linux/macOS 使用 psycopg 异步连接池；Windows 的 LangGraph Server 可能已经在
-    Proactor 事件循环中启动，psycopg 异步连接会直接拒绝该循环，因此开发环境改用
-    “线程内同步连接、请求结束即关闭”的安全降级。它没有引入第二套业务状态，只是
-    适配 Windows 的 I/O 运行时限制。
-    """
+    """使用有界连接池读取 PostGIS 地点目录，并兼容 Windows 同步连接。"""
 
     def __init__(
         self,
@@ -120,6 +121,28 @@ class PostgresCatalogRepository:
         if not catalog.attractions:
             raise LookupError(f"地点目录没有找到{city.name}附近的景点")
         return catalog
+
+    async def resolve_place(self, query: str) -> ResolvedPlace:
+        """按规范名或别名精确解析景点，并返回所属地级市。"""
+
+        normalized = normalize_location_name(query)
+        if not normalized:
+            raise LookupError("地点名称为空")
+        rows = await self._execute(PLACE_SQL, (normalized,))
+        if not rows:
+            raise LookupError(f"地点目录未覆盖景点：{query}")
+        row = rows[0]
+        city = City(
+            name=str(row["cityname"]),
+            adcode=str(row["cityadcode"]).strip(),
+            latitude=float(row["citylatitude"]),
+            longitude=float(row["citylongitude"]),
+        )
+        return ResolvedPlace(
+            query=query,
+            city=city,
+            poi=_poi(row, "attraction"),
+        )
 
     async def destination_profiles(
         self, origin: str, region: str
@@ -218,6 +241,16 @@ class CatalogTool:
         await self.cache.set(key, city, 86400)
         return city
 
+    async def resolve_place(self, query: str) -> ResolvedPlace:
+        """本地城市优先；非城市表达交给事实 Provider 解析为具体地点。"""
+
+        key = stable_key("place", normalize_location_name(query))
+        if cached := await self.cache.get(key):
+            return cast(ResolvedPlace, cached).model_copy(update={"query": query})
+        resolved = await self._resolve_place_uncached(query)
+        await self.cache.set(key, resolved, 86400)
+        return resolved
+
     async def search_candidates(self, city: City) -> CandidateCatalog:
         """本地目录优先读取 POI；未覆盖时才使用高德。"""
 
@@ -260,6 +293,22 @@ class CatalogTool:
             return await self.fallback.resolve_city(destination)
         raise ProviderError("city_not_found", f"无法确认目的地“{destination}”")
 
+    async def _resolve_place_uncached(self, query: str) -> ResolvedPlace:
+        if self.repository is not None:
+            try:
+                city = await self.repository.resolve_city(query)
+                return ResolvedPlace(query=query, city=city)
+            except LookupError:
+                pass
+            try:
+                resolved = await self.repository.resolve_place(query)
+                return await enrich_resolved_place(self.fallback, resolved)
+            except LookupError:
+                pass
+        if self.fallback is not None:
+            return await self.fallback.resolve_place(query)
+        raise ProviderError("place_not_found", f"无法确认地点“{query}”")
+
     async def _candidates_uncached(self, city: City) -> CandidateCatalog:
         if self.repository is not None:
             try:
@@ -271,6 +320,8 @@ class CatalogTool:
         if self.fallback is not None:
             return await self.fallback.search_candidates(city)
         raise ProviderError("catalog_not_found", f"未找到{city.name}的真实地点候选")
+
+
 def _city(row: Any) -> City:
     return City(
         name=str(row["name"]),
