@@ -11,8 +11,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
 
-from openzltravel.domain.errors import TravelGraphError
-from openzltravel.domain.models import (
+from domain.errors import TravelGraphError
+from domain.models import (
     CandidateCatalog,
     City,
     Poi,
@@ -22,9 +22,9 @@ from openzltravel.domain.models import (
     TravelRequirements,
     TravelSelection,
 )
-from openzltravel.runtime.contracts import PlanningDependencies
-from openzltravel.runtime.tokens import SignedPayloadCodec
-from openzltravel.travel_graph.workflow import build_travel_graph
+from runtime.contracts import PlanningDependencies
+from runtime.tokens import SignedPayloadCodec
+from travel_graph.workflow import build_travel_graph
 
 
 class CountingRoutes:

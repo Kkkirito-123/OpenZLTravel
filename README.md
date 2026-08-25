@@ -17,7 +17,7 @@ OpenZLTravel 是一个“独立旅行交流助手 + 轻量 Travel LangGraph”�
 ## 目录
 
 ```text
-backend/src/openzltravel/
+backend/src/
   assistant/          LangChain 对话服务、工具、SSE 和工单交接
   travel_graph/       LangGraph 状态、节点、API、Checkpoint 和保存
   domain/             框架无关的领域模型、确定性规划和校验
@@ -39,7 +39,7 @@ frontend/src/features/
 ```powershell
 cd backend
 python -m pip install -e ".[dev]"
-python -m uvicorn openzltravel.assistant.app:app --app-dir src --port 2030
+python -m uvicorn assistant.app:app --app-dir src --port 2030
 ```
 
 另一个终端启动 LangGraph Agent Server：

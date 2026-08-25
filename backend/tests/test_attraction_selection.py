@@ -4,8 +4,8 @@ from datetime import date
 
 import pytest
 
-from openzltravel.domain.errors import FactBoundaryError, TravelGraphError
-from openzltravel.domain.models import (
+from domain.errors import FactBoundaryError, TravelGraphError
+from domain.models import (
     ActivityDraft,
     CandidateCatalog,
     DayDraft,
@@ -17,7 +17,7 @@ from openzltravel.domain.models import (
     TravelRequirements,
     TravelSelection,
 )
-from openzltravel.domain.validation import validate_draft, validate_selection
+from domain.validation import validate_draft, validate_selection
 
 
 def _facts() -> TravelFacts:

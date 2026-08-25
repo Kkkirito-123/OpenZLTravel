@@ -19,18 +19,18 @@ from pydantic import SecretStr
 
 from benchmarks.cases import AssistantBenchmarkCase, GraphBenchmarkCase, load_cases
 from benchmarks.fixtures import assistant_dependencies, planning_dependencies, travel_order
-from openzltravel.assistant.models import (
+from assistant.models import (
     AssistantAction,
     AssistantDecision,
     AssistantSnapshot,
     AssistantTurnRequest,
 )
-from openzltravel.assistant.service import AssistantService
-from openzltravel.assistant.tools import AssistantToolbox
-from openzltravel.domain.errors import TravelGraphError
-from openzltravel.runtime.config import Settings
-from openzltravel.runtime.tokens import SignedPayloadCodec, TokenError
-from openzltravel.travel_graph.workflow import build_travel_graph
+from assistant.service import AssistantService
+from assistant.tools import AssistantToolbox
+from domain.errors import TravelGraphError
+from runtime.config import Settings
+from runtime.tokens import SignedPayloadCodec, TokenError
+from travel_graph.workflow import build_travel_graph
 
 TOOL_ALIASES = {
     "search_rail": "search_rail_options",
@@ -306,10 +306,10 @@ async def _run_graph_case(case: GraphBenchmarkCase) -> dict[str, Any]:  # noqa: 
 def _graph(codec: SignedPayloadCodec, store: InMemoryStore) -> Any:
     serde = JsonPlusSerializer(
         allowed_msgpack_modules=[
-            ("openzltravel.domain.models", "TravelOrder"),
-            ("openzltravel.domain.models", "TravelFacts"),
-            ("openzltravel.domain.models", "ItineraryDraft"),
-            ("openzltravel.domain.models", "BudgetBreakdown"),
+            ("domain.models", "TravelOrder"),
+            ("domain.models", "TravelFacts"),
+            ("domain.models", "ItineraryDraft"),
+            ("domain.models", "BudgetBreakdown"),
         ]
     )
     return build_travel_graph(

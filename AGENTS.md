@@ -9,8 +9,8 @@
 ## 当前架构不变量
 
 - `langgraph.json` 只导出一个名为 `travel` 的根图。
-- `openzltravel/assistant/` 是独立 FastAPI + LangChain `create_agent` 服务；只负责对话、事实工具、筛选和签发工单。
-- `openzltravel/travel_graph/` 只负责已签名 `TravelOrder` 的确定性规划执行，不读取 Assistant 会话、Graph State 或 Checkpoint。
+- `assistant/` 是独立 FastAPI + LangChain `create_agent` 服务；只负责对话、事实工具、筛选和签发工单。
+- `travel_graph/` 只负责已签名 `TravelOrder` 的确定性规划执行，不读取 Assistant 会话、Graph State 或 Checkpoint。
 - Assistant Session Token 和 TravelOrder Token 使用共享 HMAC 配置；后端不信任前端自造事实或选择。
 - Assistant 查询的 POI、车票、酒店、天气事实必须带稳定 ID；提交工单前刷新时间敏感事实。
 - TravelGraph 只接受 `{"order_token":"..."}`；旧消息输入、快速表单输入和旧 interrupt 均拒绝。
@@ -24,11 +24,11 @@
 
 ```text
 langgraph.json
-  → backend/src/openzltravel/assistant/
-  → backend/src/openzltravel/travel_graph/
-  → backend/src/openzltravel/domain/
-  → backend/src/openzltravel/infrastructure/
-  → backend/src/openzltravel/runtime/
+  → backend/src/assistant/
+  → backend/src/travel_graph/
+  → backend/src/domain/
+  → backend/src/infrastructure/
+  → backend/src/runtime/
   → frontend/src/features/assistant/
   → frontend/src/features/planning/
   → frontend/src/features/trips/
@@ -38,11 +38,11 @@ langgraph.json
 
 | 层 | 负责 | 不负责 |
 |---|---|---|
-| `openzltravel/domain/` | 模型、确定性规划、预算、事实校验 | 网络、环境变量、Graph 路由 |
-| `openzltravel/assistant/` | 自然语言、只读工具、会话快照、工单交接 | 写 Store、运行 TravelGraph |
-| `openzltravel/infrastructure/` | 地点、铁路、酒店、天气、路线事实 | 控制 Graph 路由、调用 Agent |
-| `openzltravel/runtime/` | 配置、Protocol、身份、依赖装配、签名 Token | 承载业务状态 |
-| `openzltravel/travel_graph/` | 工单验证、规划、路线、预算、确认、保存及其 HTTP API | 需求收集、事实发现、旧表单 |
+| `domain/` | 模型、确定性规划、预算、事实校验 | 网络、环境变量、Graph 路由 |
+| `assistant/` | 自然语言、只读工具、会话快照、工单交接 | 写 Store、运行 TravelGraph |
+| `infrastructure/` | 地点、铁路、酒店、天气、路线事实 | 控制 Graph 路由、调用 Agent |
+| `runtime/` | 配置、Protocol、身份、依赖装配、签名 Token | 承载业务状态 |
+| `travel_graph/` | 工单验证、规划、路线、预算、确认、保存及其 HTTP API | 需求收集、事实发现、旧表单 |
 | `frontend/src/features/` | Assistant、Planning、Trips 三块展示与交接 | 解析自然语言、制造事实 |
 
 ## 代码规则

@@ -3,7 +3,7 @@
 from datetime import date
 from typing import Literal
 
-from openzltravel.domain.models import (
+from domain.models import (
     HotelOption,
     RailChoice,
     RailOption,
@@ -12,7 +12,7 @@ from openzltravel.domain.models import (
     TravelRequirements,
     TravelSelection,
 )
-from openzltravel.domain.planning import calculate_selection_budget_preview
+from domain.planning import calculate_selection_budget_preview
 
 
 def _rail(

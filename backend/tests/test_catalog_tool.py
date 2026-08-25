@@ -4,10 +4,10 @@ from typing import Any
 
 import pytest
 
-from openzltravel.domain.models import CandidateCatalog, City, Poi, ResolvedPlace
-from openzltravel.infrastructure.catalog.ranking import DestinationProfile
-from openzltravel.infrastructure.catalog.tool import CatalogTool, PostgresCatalogRepository
-from openzltravel.infrastructure.providers.base import CatalogUnavailableError
+from domain.models import CandidateCatalog, City, Poi, ResolvedPlace
+from infrastructure.catalog.ranking import DestinationProfile
+from infrastructure.catalog.tool import CatalogTool, PostgresCatalogRepository
+from infrastructure.providers.base import CatalogUnavailableError
 
 
 class ProfileRepository:

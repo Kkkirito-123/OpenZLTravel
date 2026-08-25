@@ -16,21 +16,21 @@ State、Checkpoint 或节点。
 
 ### Assistant
 
-1. `backend/src/openzltravel/assistant/models.py`：一轮请求、公开快照、Action 和 Handoff。
-2. `backend/src/openzltravel/assistant/app.py`：匿名身份认证和 SSE 事件边界。
-3. `backend/src/openzltravel/assistant/service.py`：从签名 Token 恢复快照、用 LLM 理解资料、调用 Agent 和签发工单。
-4. `backend/src/openzltravel/assistant/tools.py`：Catalog、铁路、酒店、天气工具怎样写入权威事实。
-5. `backend/src/openzltravel/assistant/selection.py`：卡片与自然语言如何统一校验已有事实 ID。
-6. `backend/src/openzltravel/runtime/tokens.py`：类型、用户、签发和过期时间如何进入 HMAC Token。
+1. `backend/src/assistant/models.py`：一轮请求、公开快照、Action 和 Handoff。
+2. `backend/src/assistant/app.py`：匿名身份认证和 SSE 事件边界。
+3. `backend/src/assistant/service.py`：从签名 Token 恢复快照、用 LLM 理解资料、调用 Agent 和签发工单。
+4. `backend/src/assistant/tools.py`：Catalog、铁路、酒店、天气工具怎样写入权威事实。
+5. `backend/src/assistant/selection.py`：卡片与自然语言如何统一校验已有事实 ID。
+6. `backend/src/runtime/tokens.py`：类型、用户、签发和过期时间如何进入 HMAC Token。
 
 ### TravelGraph
 
-1. `backend/src/openzltravel/travel_graph/state.py`：图状态只剩工单、事实、草稿、预算和结果。
-2. `backend/src/openzltravel/travel_graph/workflow.py`：顺序固定，没有 Supervisor 和需求阶段。
-3. `backend/src/openzltravel/travel_graph/nodes/order.py`：只接受 `order_token`。
-4. `backend/src/openzltravel/travel_graph/nodes/planning.py`：确定性日程、最终路线和预算。
-5. `backend/src/openzltravel/travel_graph/nodes/confirmation.py`：唯一 `route_preview` interrupt 和受限修改。
-6. `backend/src/openzltravel/travel_graph/nodes/persistence.py`：`user_id + order_id` 幂等保存。
+1. `backend/src/travel_graph/state.py`：图状态只剩工单、事实、草稿、预算和结果。
+2. `backend/src/travel_graph/workflow.py`：顺序固定，没有 Supervisor 和需求阶段。
+3. `backend/src/travel_graph/nodes/order.py`：只接受 `order_token`。
+4. `backend/src/travel_graph/nodes/planning.py`：确定性日程、最终路线和预算。
+5. `backend/src/travel_graph/nodes/confirmation.py`：唯一 `route_preview` interrupt 和受限修改。
+6. `backend/src/travel_graph/nodes/persistence.py`：`user_id + order_id` 幂等保存。
 
 ### 前端
 

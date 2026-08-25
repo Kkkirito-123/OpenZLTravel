@@ -31,11 +31,11 @@ Assistant 与 TravelGraph 业务隔离：不共享 Graph State、Checkpoint 或�
 
 | 层 | 职责 |
 |---|---|
-| `backend/src/openzltravel/assistant/` | 独立 LangChain 服务：会话恢复、Agent、只读工具、SSE 和工单签发 |
-| `backend/src/openzltravel/travel_graph/` | 独立 LangGraph 服务：工单认证、日程、路线、预算、确认、保存和 HTTP API |
-| `backend/src/openzltravel/domain/` | 两个服务共享的 TravelOrder、事实模型、确定性规划和校验 |
-| `backend/src/openzltravel/infrastructure/` | Catalog、12306、RollingGo、天气和路线 Provider 适配器 |
-| `backend/src/openzltravel/runtime/` | Settings、Protocol、身份、依赖装配和 HMAC Token |
+| `backend/src/assistant/` | 独立 LangChain 服务：会话恢复、Agent、只读工具、SSE 和工单签发 |
+| `backend/src/travel_graph/` | 独立 LangGraph 服务：工单认证、日程、路线、预算、确认、保存和 HTTP API |
+| `backend/src/domain/` | 两个服务共享的 TravelOrder、事实模型、确定性规划和校验 |
+| `backend/src/infrastructure/` | Catalog、12306、RollingGo、天气和路线 Provider 适配器 |
+| `backend/src/runtime/` | Settings、Protocol、身份、依赖装配和 HMAC Token |
 | `frontend/src/features/assistant/` | Assistant 页面、SSE Gateway、卡片和浏览器会话 |
 | `frontend/src/features/planning/` | Graph Thread/Run、路线确认和最终行程 |
 | `frontend/src/features/trips/` | 历史行程 |

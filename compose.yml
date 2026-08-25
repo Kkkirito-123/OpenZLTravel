@@ -65,7 +65,7 @@ services:
       - python
       - -m
       - uvicorn
-      - openzltravel.assistant.app:app
+      - assistant.app:app
       - --app-dir
       - /app/backend/src
       - --host

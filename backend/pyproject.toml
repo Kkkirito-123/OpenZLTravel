@@ -37,9 +37,13 @@ eval = [
 [tool.setuptools.packages.find]
 where = ["src", "."]
 include = [
+    "assistant*",
     "benchmarks*",
     "catalog_builder*",
-    "openzltravel*",
+    "domain*",
+    "infrastructure*",
+    "runtime*",
+    "travel_graph*",
 ]
 
 [tool.setuptools.package-data]
@@ -68,4 +72,4 @@ disallow_untyped_defs = true
 no_implicit_optional = true
 warn_return_any = true
 warn_unused_ignores = true
-packages = ["openzltravel", "benchmarks"]
+packages = ["assistant", "benchmarks", "domain", "infrastructure", "runtime", "travel_graph"]
