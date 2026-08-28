@@ -10,13 +10,25 @@
 
 > [!IMPORTANT]
 >
-> OpenZLTravel 是一个用于学习 LangChain 与 LangGraph 工程边界的开发态 AI 旅行规划工作台。它不是预订平台，不提供支付、下单、机票查询、多城市行程或正式账号系统，查询结果也不构成库存或价格承诺。
+> ## 学习内容与项目状态
+>
+> OpenZLTravel 是一个用于学习和实践 LangChain、LangGraph 工程边界的 AI 旅行规划工作台。项目当前处于开发阶段，重点展示“对话收集需求”和“确定性规划执行”如何通过签名工单衔接。
+>
+> **当前已实现：**
+>
+> - Assistant 通过自然语言收集出发地、目的地、日期、人数、预算和偏好。
+> - 服务端校验城市、景点、车次、酒店和天气事实，前端不能自行编造价格或库存。
+> - TravelGraph 根据已签名工单生成逐日行程、路线和预算，并支持有限的方案修改。
+>
+> **当前不提供：** 支付、下单、机票查询、多城市行程、生产级账号系统，以及任何库存或价格承诺。
 
-用户通过自然语言说明出发地、目的地、日期、人数、预算与偏好。Assistant 查询并校验景点、车次、酒店和天气；用户确认这些事实后，服务端签发短时旅行工单，再由 TravelGraph 生成日程、路线与预算供用户确认。确认后的行程只保存到当前运行实例的历史记录。
+一次完整的规划会依次经过事实收集、工单交接和确定性规划三个阶段。下面先介绍用户可以看到的流程，再说明模块边界与启动方式。
 
 ![OpenZLTravel 工作台](docs/images/openzltravel-assistant.png)
 
 ## 使用流程
+
+Assistant 负责理解需求、查询事实和等待用户选择；TravelGraph 只接收已签名的旅行工单，负责生成可审阅的行程。两者之间的交接点是 `TravelOrder Token`。
 
 1. 在对话中补齐旅行需求。
 2. 从服务端提供的卡片中选择城市、景点、去返程车次与酒店；席别偏好可在对话中说明，交通或住宿也可以标记为自行安排。
@@ -234,13 +246,13 @@ OpenZLTravel/
 `-- start.ps1
 ```
 
-## 许可与数据来源
-
-项目源代码依据 [MIT 许可证](LICENSE) 发布。地点目录整合了 OpenStreetMap、GeoNames、Modood、AreaCity 等公开数据；使用或再分发目录备份时，请遵循 [数据清单](docs/data/catalog-20260828.json) 中记录的来源与许可证要求，这些第三方条款独立于本项目的 MIT 许可证。
-
 ## 致谢
 
 项目在交互设计与工程实现上参考了以下公开项目，感谢其作者与贡献者：
 
 - [tutu-zzz/zhilv-yuntu](https://github.com/tutu-zzz/zhilv-yuntu)
 - [Reyzowter/Hello-Agents](https://github.com/Reyzowter/Hello-Agents)
+
+## 许可与数据来源
+
+项目源代码依据 [MIT 许可证](LICENSE) 发布。地点目录整合了 OpenStreetMap、GeoNames、Modood、AreaCity 等公开数据；使用或再分发目录备份时，请遵循 [数据清单](docs/data/catalog-20260828.json) 中记录的来源与许可证要求，这些第三方条款独立于本项目的 MIT 许可证。

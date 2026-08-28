@@ -10,22 +10,36 @@
 
 > [!IMPORTANT]
 >
-> OpenZLTravel is a development-stage AI travel-planning workbench created to
-> study the engineering boundary between LangChain and LangGraph. It is not a
-> booking platform. It does not provide payments, purchases, flight search,
-> multi-city itineraries, or production accounts, and its results are not
-> inventory or price commitments.
+> ## Learning Scope and Project Status
+>
+> OpenZLTravel is an AI travel-planning workbench for learning and practicing
+> the engineering boundary between LangChain and LangGraph. It is currently a
+> development-stage project focused on how conversational requirements and
+> deterministic planning can be connected through a signed travel order.
+>
+> **Implemented today:**
+>
+> - The Assistant collects origin, destination, dates, party size, budget, and
+>   preferences through natural language.
+> - The server validates city, attraction, train, hotel, and weather facts; the
+>   frontend cannot invent prices or inventory.
+> - TravelGraph builds a day-by-day itinerary, routes, and budget from the
+>   signed order, with a limited set of supported revisions.
+>
+> **Out of scope:** payments, purchases, flight search, multi-city itineraries,
+> production accounts, and any inventory or price commitment.
 
-Users describe their origin, destination, dates, party size, budget, and
-preferences in natural language. The Assistant retrieves and validates
-attractions, trains, hotels, and weather. After the user confirms those facts,
-the server issues a short-lived travel order and TravelGraph builds an itinerary,
-routes, and a budget for review. Confirmed trips are saved only in the current
-runtime's history.
+Each planning run has three stages: fact collection, order handoff, and
+deterministic planning. The sections below explain the user flow first, then
+the module boundaries and startup path.
 
 ![OpenZLTravel workspace](docs/images/openzltravel-assistant.png)
 
 ## User Flow
+
+The Assistant handles requirements, fact lookup, and user selections. TravelGraph
+accepts only a signed travel order and produces an itinerary for review. The
+handoff between them is the `TravelOrder Token`.
 
 1. Complete the travel requirements through conversation.
 2. Select a city, attractions, outbound and return train options, and a hotel
@@ -302,14 +316,6 @@ OpenZLTravel/
 `-- start.ps1
 ```
 
-## License and Data Sources
-
-Project source code is released under the [MIT License](LICENSE). The catalog
-combines public data from OpenStreetMap, GeoNames, Modood, AreaCity, and other
-sources. When using or redistributing the catalog backup, follow the source and
-license requirements recorded in the [catalog manifest](docs/data/catalog-20260828.json);
-those third-party terms are separate from this project's MIT License.
-
 ## Acknowledgements
 
 The project draws on ideas and implementation patterns from these public
@@ -317,3 +323,11 @@ projects. Thanks to their authors and contributors:
 
 - [tutu-zzz/zhilv-yuntu](https://github.com/tutu-zzz/zhilv-yuntu)
 - [Reyzowter/Hello-Agents](https://github.com/Reyzowter/Hello-Agents)
+
+## License and Data Sources
+
+Project source code is released under the [MIT License](LICENSE). The catalog
+combines public data from OpenStreetMap, GeoNames, Modood, AreaCity, and other
+sources. When using or redistributing the catalog backup, follow the source and
+license requirements recorded in the [catalog manifest](docs/data/catalog-20260828.json);
+those third-party terms are separate from this project's MIT License.
