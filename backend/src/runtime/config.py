@@ -37,6 +37,7 @@ class Settings:
     model_api_key: str | None
     model_base_url: str | None
     fast_model: str
+    model_timeout_seconds: float
     provider_mode: ProviderMode
     rail_provider: RailProviderMode
     catalog_database_url: str | None
@@ -86,6 +87,7 @@ class Settings:
             model_api_key=_first_env("OPENAI_API_KEY"),
             model_base_url=_first_env("OPENAI_BASE_URL"),
             fast_model=_first_env("TRAVEL_FAST_MODEL") or "gpt-5-mini",
+            model_timeout_seconds=_positive_float("OPENAI_TIMEOUT_SECONDS", 20.0),
             provider_mode=cast(ProviderMode, provider_mode),
             rail_provider=cast(RailProviderMode, rail_provider),
             catalog_database_url=catalog_database_url,

@@ -1,0 +1,40 @@
+flowchart TB
+    token["TravelOrder Token"]
+
+    subgraph graph["TravelGraph"]
+        direction TB
+        validate["validate_order<br/>验证身份、签名与事实"]
+        itinerary["build_itinerary<br/>生成每日活动顺序"]
+        routes["build_routes<br/>查询最终路线"]
+        budget["calculate_budget<br/>计算预算"]
+        check["validate_plan<br/>校验完整性"]
+        preview["route_preview<br/>Interrupt"]
+        save["save_trip<br/>幂等保存"]
+
+        validate --> itinerary
+        itinerary --> routes
+        routes --> budget
+        budget --> check
+        check --> preview
+        preview -->|"确认"| save
+        preview -->|"移动景点 / 减少一天活动"| itinerary
+    end
+
+    checkpoint[("LangGraph Checkpoint")]
+    store[("Trip Store")]
+    done(["END"])
+
+    token --> validate
+    preview -. "保存中断状态" .-> checkpoint
+    checkpoint -. "恢复 Run" .-> preview
+    save --> store
+    save --> done
+
+    classDef input fill:#ECFDF5,stroke:#059669,color:#064E3B;
+    classDef process fill:#EFF6FF,stroke:#2563EB,color:#1E3A8A;
+    classDef interrupt fill:#F5F3FF,stroke:#7C3AED,color:#4C1D95;
+    classDef output fill:#FFF7ED,stroke:#EA580C,color:#7C2D12;
+    class token input;
+    class validate,itinerary,routes,budget,check process;
+    class preview,checkpoint interrupt;
+    class save,store,done output;

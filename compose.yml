@@ -79,6 +79,10 @@ services:
       AUTH_SECRET: ${AUTH_SECRET:-openzltravel-local-development-secret-only}
       PROVIDER_MODE: ${PROVIDER_MODE:-live}
       RAIL_PROVIDER: ${RAIL_PROVIDER:-public}
+      OPENAI_API_KEY: ${LLM_API_KEY:?backend/.env 缺少 LLM_API_KEY}
+      OPENAI_BASE_URL: ${LLM_BASE_URL:?backend/.env 缺少 LLM_BASE_URL}
+      TRAVEL_FAST_MODEL: ${LLM_MODEL:?backend/.env 缺少 LLM_MODEL}
+      OPENAI_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-60}
       CATALOG_DATABASE_URL: "host=catalogdb port=5432 dbname=openzltravelcatalog user=travelapp password='${TRAVELAPP_POSTGRES_PASSWORD:?backend/.env.catalog.local 缺少 TRAVELAPP_POSTGRES_PASSWORD}'"
       PYTHONUTF8: "1"
     depends_on:

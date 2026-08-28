@@ -7,14 +7,18 @@ from __future__ import annotations
 
 import asyncio
 import re
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any, Literal, Protocol, cast
+from zoneinfo import ZoneInfo
 
 from domain.models import RailOption, RailSeat
 
 from .base import ProviderError, ProviderRuntime, stable_fact_id, stable_key
 
 Direction = Literal["outbound", "return"]
+
+# 12306 的 15 天预售期包含开售当天，因此最远可查询日期是今天后的第 14 天。
+RAIL_ADVANCE_SALE_DAYS = 15
 
 SEAT_NAMES = {
     "business": "商务座",
@@ -61,6 +65,16 @@ class RailProvider:
 
         if direction not in {"outbound", "return"}:
             raise ValueError("direction 必须为 outbound 或 return")
+        today = _today_in_shanghai()
+        if travel_date < today:
+            raise ProviderError("rail_date_in_past", "出行日期已过去，无法查询 12306 余票")
+        if travel_date > today + timedelta(days=RAIL_ADVANCE_SALE_DAYS - 1):
+            sale_date = travel_date - timedelta(days=RAIL_ADVANCE_SALE_DAYS - 1)
+            raise ProviderError(
+                "rail_not_on_sale",
+                f"该日期尚未进入 12306 预售期，最早可于 {sale_date.isoformat()} 查询"
+                "（通常提前 15 天开售，含出发当天；具体开售时刻以 12306 为准）",
+            )
         query_origin, query_destination = (
             (destination, origin) if direction == "return" else (origin, destination)
         )
@@ -234,3 +248,9 @@ def _error_message(payload: Any) -> str:
     if isinstance(errors, list):
         return "；".join(_text(item) for item in errors if _text(item))
     return ""
+
+
+def _today_in_shanghai() -> date:
+    """返回 12306 使用的中国标准日期。"""
+
+    return datetime.now(ZoneInfo("Asia/Shanghai")).date()

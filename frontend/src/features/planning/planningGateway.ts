@@ -172,7 +172,6 @@ function normalizeState(value: unknown): PlanningState {
     ...value,
     facts: isRecord(value.facts) ? value.facts as unknown as PlanningState["facts"] : emptyPlanningState().facts,
     warnings: Array.isArray(value.warnings) ? value.warnings as PlanningState["warnings"] : [],
-    errors: Array.isArray(value.errors) ? value.errors as PlanningState["errors"] : [],
   } as PlanningState;
 }
 

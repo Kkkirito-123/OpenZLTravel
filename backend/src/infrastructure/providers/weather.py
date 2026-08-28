@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any, Protocol, cast
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -11,6 +12,10 @@ from domain.models import City, WeatherDay
 
 from .base import ProviderError, ProviderRuntime, stable_key
 from .geo import list_values
+
+WEATHER_FORECAST_DAYS = 16
+FUTURE_FORECAST_WARNING = "距离出行日期较远，尚未进入可靠天气预报覆盖期"
+WEATHER_SERVICE_WARNING = "天气服务暂时不可用"
 
 
 class WeatherFallback(Protocol):
@@ -83,7 +88,7 @@ class OpenMeteoClient:
 
 
 class WeatherProvider:
-    """优先使用 Open-Meteo，再用高德补齐，未知日期显式标记。"""
+    """优先使用 Open-Meteo，再用高德补齐；远期和服务失败分别标记。"""
 
     def __init__(self, primary: OpenMeteoClient, fallback: WeatherFallback | None = None) -> None:
         self.primary = primary
@@ -94,18 +99,26 @@ class WeatherProvider:
     ) -> list[WeatherDay]:
         """返回完整日期范围，但绝不为缺失天气或温度造值。"""
 
-        primary = await _safe_weather(self.primary, city, start_date, end_date)
-        by_date = {item.date: item for item in primary}
-        if self.fallback is not None and not _covers(by_date, start_date, end_date):
-            fallback = await _safe_weather(self.fallback, city, start_date, end_date)
-            for item in fallback:
-                by_date.setdefault(item.date, item)
+        forecast_end = _today_in_shanghai() + timedelta(days=WEATHER_FORECAST_DAYS - 1)
+        query_end = min(end_date, forecast_end)
+        by_date: dict[date, WeatherDay] = {}
+        if start_date <= query_end:
+            primary = await _safe_weather(self.primary, city, start_date, query_end)
+            by_date = {item.date: item for item in primary}
+            if self.fallback is not None and not _covers(by_date, start_date, query_end):
+                fallback = await _safe_weather(self.fallback, city, start_date, query_end)
+                for item in fallback:
+                    by_date.setdefault(item.date, item)
         return [
             by_date.get(
                 item_date,
                 WeatherDay(
                     date=item_date,
-                    warning="暂无可靠天气预报",
+                    warning=(
+                        FUTURE_FORECAST_WARNING
+                        if item_date > forecast_end
+                        else WEATHER_SERVICE_WARNING
+                    ),
                     source=None,
                 ),
             )
@@ -185,3 +198,9 @@ def _wmo_text(value: Any) -> str:
 
 def _temperature(value: Any) -> str | None:
     return str(round(float(value))) if isinstance(value, (int, float)) else None
+
+
+def _today_in_shanghai() -> date:
+    """返回天气查询窗口使用的中国标准日期。"""
+
+    return datetime.now(ZoneInfo("Asia/Shanghai")).date()

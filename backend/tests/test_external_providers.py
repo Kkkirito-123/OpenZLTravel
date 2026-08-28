@@ -7,6 +7,8 @@ from typing import Any
 import httpx
 import pytest
 
+import infrastructure.providers.rail as rail_module
+import infrastructure.providers.weather as weather_module
 from domain.models import CandidateCatalog, City, Poi, RouteSegment, TravelRequirements
 from infrastructure.providers.amap import AmapClient
 from infrastructure.providers.base import ProviderError
@@ -342,7 +344,12 @@ async def test_amap_enrichment_prioritizes_first_screen_attractions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_weather_falls_back_to_explicit_unknown_days() -> None:
+async def test_weather_falls_back_to_explicit_unknown_days(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    today = date(2026, 8, 28)
+    monkeypatch.setattr(weather_module, "_today_in_shanghai", lambda: today)
+
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(503)
 
@@ -351,12 +358,62 @@ async def test_weather_falls_back_to_explicit_unknown_days() -> None:
     provider = WeatherProvider(primary)
     city = City(name="杭州", latitude=30.2, longitude=120.1)
 
-    weather = await provider.get_weather(city, date(2026, 8, 20), date(2026, 8, 21))
+    weather = await provider.get_weather(city, today, date(2026, 8, 29))
 
     assert len(weather) == 2
     assert all(item.day_weather is None for item in weather)
-    assert all(item.warning == "暂无可靠天气预报" for item in weather)
+    assert all(item.warning == weather_module.WEATHER_SERVICE_WARNING for item in weather)
     await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_far_future_weather_skips_providers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    today = date(2026, 8, 28)
+    monkeypatch.setattr(weather_module, "_today_in_shanghai", lambda: today)
+
+    class UnexpectedWeatherProvider:
+        async def get_weather(
+            self, city: City, start_date: date, end_date: date
+        ) -> list[Any]:
+            raise AssertionError("远期天气不应访问外部数据源")
+
+    provider = WeatherProvider(UnexpectedWeatherProvider())  # type: ignore[arg-type]
+    city = City(name="杭州", latitude=30.2, longitude=120.1)
+
+    weather = await provider.get_weather(city, date(2026, 10, 1), date(2026, 10, 3))
+
+    assert len(weather) == 3
+    assert all(item.warning == weather_module.FUTURE_FORECAST_WARNING for item in weather)
+
+
+@pytest.mark.asyncio
+async def test_weather_range_is_split_at_forecast_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    today = date(2026, 8, 28)
+    monkeypatch.setattr(weather_module, "_today_in_shanghai", lambda: today)
+    boundary = date(2026, 9, 12)
+    calls: list[tuple[date, date]] = []
+
+    class EmptyWeatherProvider:
+        async def get_weather(
+            self, city: City, start_date: date, end_date: date
+        ) -> list[Any]:
+            calls.append((start_date, end_date))
+            return []
+
+    provider = WeatherProvider(EmptyWeatherProvider())  # type: ignore[arg-type]
+    city = City(name="杭州", latitude=30.2, longitude=120.1)
+
+    weather = await provider.get_weather(city, boundary, date(2026, 9, 13))
+
+    assert calls == [(boundary, boundary)]
+    assert [item.warning for item in weather] == [
+        weather_module.WEATHER_SERVICE_WARNING,
+        weather_module.FUTURE_FORECAST_WARNING,
+    ]
 
 
 class FakeRailClient:
@@ -387,12 +444,17 @@ class FakeRailClient:
 
 
 @pytest.mark.asyncio
-async def test_rail_combines_ticket_and_real_price() -> None:
+async def test_rail_combines_ticket_and_real_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        rail_module, "_today_in_shanghai", lambda: date(2026, 8, 28)
+    )
     client = FakeRailClient()
     provider = RailProvider(client)
 
     options, cache_hit = await provider.search(
-        "杭州", "SHH", date(2026, 8, 20), "outbound"
+        "杭州", "SHH", date(2026, 9, 1), "outbound"
     )
 
     assert cache_hit is False
@@ -400,14 +462,42 @@ async def test_rail_combines_ticket_and_real_price() -> None:
     assert options[0].has_ticket is True
     assert options[0].option_id.startswith("rail:")
 
-    await provider.search("杭州", "SHH", date(2026, 8, 21), "return")
+    await provider.search("杭州", "SHH", date(2026, 9, 2), "return")
     assert client.ticket_arguments[-1]["from_station"] == "SHH"
     assert client.ticket_arguments[-1]["to_station"] == "HZH"
 
 
 @pytest.mark.asyncio
-async def test_public_12306_client_uses_zlagent_query_flow() -> None:
+async def test_far_future_rail_date_skips_12306(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        rail_module, "_today_in_shanghai", lambda: date(2026, 8, 28)
+    )
+
+    class UnexpectedRailClient:
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            raise AssertionError("未进入预售期时不应访问 12306")
+
+    provider = RailProvider(UnexpectedRailClient())
+
+    with pytest.raises(ProviderError) as captured:
+        await provider.search("上海", "杭州", date(2026, 10, 1), "outbound")
+
+    assert captured.value.code == "rail_not_on_sale"
+    assert captured.value.retryable is False
+    assert "2026-09-17" in captured.value.message
+
+
+@pytest.mark.asyncio
+async def test_public_12306_client_uses_zlagent_query_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """验证 ZLAgent 同款的公共 12306 查询链路可被当前 RailProvider 复用。"""
+
+    monkeypatch.setattr(
+        rail_module, "_today_in_shanghai", lambda: date(2026, 8, 28)
+    )
 
     fields = [""] * 36
     fields[1] = "Y"
@@ -457,7 +547,7 @@ async def test_public_12306_client_uses_zlagent_query_flow() -> None:
     provider = RailProvider(client)
 
     options, cache_hit = await provider.search(
-        "杭州", "SHH", date(2026, 8, 20), "outbound"
+        "杭州", "SHH", date(2026, 9, 1), "outbound"
     )
 
     assert cache_hit is False

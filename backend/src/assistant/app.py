@@ -14,8 +14,9 @@ from collections.abc import AsyncIterator
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from assistant.errors import AssistantModelError
 from assistant.models import AssistantTurnRequest
-from assistant.service import AssistantModelError, AssistantService
+from assistant.service import AssistantService
 from runtime.config import Settings, get_settings
 from runtime.container import get_assistant_dependencies
 from runtime.identity import IdentityError, authenticate_identity

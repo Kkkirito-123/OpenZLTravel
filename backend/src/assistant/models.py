@@ -78,7 +78,6 @@ class AssistantTurnRequest(StrictModel):
 class AssistantDecision(StrictModel):
     """LLM 对当前用户输入的结构化理解，不允许直接创建 Provider 事实。"""
 
-    reply: str = Field(min_length=1, max_length=600)
     patch: RequirementPatch = Field(default_factory=RequirementPatch)
     attraction_ids: list[str] = Field(default_factory=list, max_length=28)
     outbound_option_id: str | None = None

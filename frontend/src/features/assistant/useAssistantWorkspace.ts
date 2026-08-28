@@ -54,7 +54,7 @@ export function useAssistantWorkspace() {
   const disconnected = ref(false);
   const error = ref("");
   const pendingUserMessage = ref("");
-  const streamingReply = ref("");
+  const turnReply = ref("");
   const lastTurn = ref<AssistantTurn | null>(null);
   const historyOpen = ref(false);
   const historyLoading = ref(false);
@@ -111,7 +111,7 @@ export function useAssistantWorkspace() {
     };
     lastTurn.value = input;
     pendingUserMessage.value = input.message ?? actionLabel(input.action);
-    streamingReply.value = "";
+    turnReply.value = "";
     tools.value = [];
     running.value = true;
     disconnected.value = false;
@@ -119,8 +119,7 @@ export function useAssistantWorkspace() {
     let handoff: AssistantHandoff | null = null;
     try {
       await assistantGateway.turn(request, {
-        onMessage: (content) => { streamingReply.value += content; },
-        onToolStarted: markToolStarted,
+        onMessage: (content) => { turnReply.value = content; },
         onToolResult: markToolCompleted,
         onSession: updateSession,
         onHandoff: (value) => { handoff = value; },
@@ -131,7 +130,7 @@ export function useAssistantWorkspace() {
       setError(cause, "Assistant SSE 已断开，可以重试这一轮");
     } finally {
       pendingUserMessage.value = "";
-      streamingReply.value = "";
+      turnReply.value = "";
       running.value = false;
     }
   }
@@ -298,10 +297,6 @@ export function useAssistantWorkspace() {
     writeText(SESSION_SNAPSHOT_KEY, JSON.stringify(snapshot));
   }
 
-  function markToolStarted(name: string): void {
-    tools.value = [...tools.value.filter((item) => item.name !== name), { name, status: "running" }];
-  }
-
   function markToolCompleted(name: string, artifact?: string): void {
     tools.value = [
       ...tools.value.filter((item) => item.name !== name),
@@ -324,7 +319,7 @@ export function useAssistantWorkspace() {
     disconnected,
     error,
     pendingUserMessage,
-    streamingReply,
+    turnReply,
     historyOpen,
     historyLoading,
     history,

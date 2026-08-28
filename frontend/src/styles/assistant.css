@@ -56,7 +56,34 @@
 .chat-row.pending { opacity: .72; }
 .chat-avatar { display: grid; place-items: center; width: 30px; height: 30px; color: var(--brand-strong); font-size: 11px; font-weight: 750; background: var(--brand-soft); border-radius: 9px; }
 .chat-row.user .chat-avatar { color: var(--muted); background: var(--surface-strong); }
-.chat-row p { margin: 0; padding: 10px 12px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--surface); border: 1px solid var(--line); border-radius: 3px 10px 10px; }
+.chat-row > p,
+.assistant-markdown { min-width: 0; margin: 0; padding: 10px 12px; overflow-wrap: anywhere; background: var(--surface); border: 1px solid var(--line); border-radius: 3px 10px 10px; }
+.chat-row > p { white-space: pre-wrap; }
+.assistant-waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 210px;
+  min-height: 42px;
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 3px 10px 10px;
+}
+.assistant-markdown { overflow-x: auto; }
+.assistant-markdown > :first-child { margin-top: 0; }
+.assistant-markdown > :last-child { margin-bottom: 0; }
+.assistant-markdown p,
+.assistant-markdown ul,
+.assistant-markdown ol { margin: 0 0 8px; }
+.assistant-markdown ul,
+.assistant-markdown ol { padding-left: 20px; }
+.assistant-markdown table { width: 100%; margin: 4px 0 8px; border-collapse: collapse; font-size: 13px; }
+.assistant-markdown th,
+.assistant-markdown td { padding: 7px 8px; text-align: left; border: 1px solid var(--line-strong); }
+.assistant-markdown th { background: var(--surface-strong); }
 
 .tool-trace { width: min(620px, 100%); padding: 10px 12px; color: var(--muted); background: #fbfdfb; border: 1px solid #cde2d5; border-radius: var(--radius-md); }
 .tool-trace header { display: flex; align-items: center; gap: 6px; color: var(--brand-strong); }

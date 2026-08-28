@@ -1,4 +1,4 @@
-export type PlanningPhase = "planning" | "awaiting_route_confirmation" | "completed" | "failed";
+export type PlanningPhase = "planning" | "awaiting_route_confirmation" | "completed";
 
 export interface TravelRequirements {
   origin?: string | null;
@@ -253,7 +253,7 @@ export interface AssistantHandoff {
 
 export interface ToolEvent {
   name: string;
-  status: "running" | "completed";
+  status: "completed";
   artifact?: string;
 }
 
@@ -274,7 +274,6 @@ export interface PlanningState {
   budget?: BudgetBreakdown | null;
   trip_id?: string | null;
   warnings: GraphNotice[];
-  errors: GraphNotice[];
 }
 
 export interface PlanningSnapshot {
@@ -308,6 +307,5 @@ export function emptyPlanningState(): PlanningState {
     phase: "planning",
     facts: { ...EMPTY_FACTS },
     warnings: [],
-    errors: [],
   };
 }

@@ -46,5 +46,4 @@ class OrderNodes:
             "facts": order.facts,
             "route_revision_instruction": None,
             "warnings": [],
-            "errors": [],
         }
