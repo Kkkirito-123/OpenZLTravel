@@ -302,15 +302,18 @@ OpenZLTravel/
 `-- start.ps1
 ```
 
-## License and Attribution
+## License and Data Sources
 
-This repository currently has no root-level `LICENSE` file, so no open-source
-license has been declared for the project code. The catalog combines public data
-from OpenStreetMap, GeoNames, Modood, AreaCity, and other sources. When using or
-redistributing the backup, preserve the source and license information in the
-[catalog manifest](docs/data/catalog-20260828.json).
+Project source code is released under the [MIT License](LICENSE). The catalog
+combines public data from OpenStreetMap, GeoNames, Modood, AreaCity, and other
+sources. When using or redistributing the catalog backup, follow the source and
+license requirements recorded in the [catalog manifest](docs/data/catalog-20260828.json);
+those third-party terms are separate from this project's MIT License.
 
-## Inspiration
+## Acknowledgements
+
+The project draws on ideas and implementation patterns from these public
+projects. Thanks to their authors and contributors:
 
 - [tutu-zzz/zhilv-yuntu](https://github.com/tutu-zzz/zhilv-yuntu)
 - [Reyzowter/Hello-Agents](https://github.com/Reyzowter/Hello-Agents)
