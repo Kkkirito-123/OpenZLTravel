@@ -234,11 +234,13 @@ OpenZLTravel/
 `-- start.ps1
 ```
 
-## 许可与署名
+## 许可与数据来源
 
-仓库目前没有根级 `LICENSE` 文件，因此项目代码尚未声明开源许可证。地点目录聚合了 OpenStreetMap、GeoNames、Modood、AreaCity 等公开数据；使用或再分发备份时，请保留 [数据清单](docs/data/catalog-20260828.json) 中的来源与许可证信息。
+项目源代码依据 [MIT 许可证](LICENSE) 发布。地点目录整合了 OpenStreetMap、GeoNames、Modood、AreaCity 等公开数据；使用或再分发目录备份时，请遵循 [数据清单](docs/data/catalog-20260828.json) 中记录的来源与许可证要求，这些第三方条款独立于本项目的 MIT 许可证。
 
-## 灵感来源
+## 致谢
+
+项目在交互设计与工程实现上参考了以下公开项目，感谢其作者与贡献者：
 
 - [tutu-zzz/zhilv-yuntu](https://github.com/tutu-zzz/zhilv-yuntu)
 - [Reyzowter/Hello-Agents](https://github.com/Reyzowter/Hello-Agents)
