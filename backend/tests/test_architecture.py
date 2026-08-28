@@ -164,7 +164,7 @@ def test_graph_nodes_use_only_runtime_contracts_and_tokens() -> None:
 def test_graph_package_initializers_do_not_eagerly_load_workflow() -> None:
     """导入一个节点或 State 时，不应通过包入口隐式装载整张图。
 
-    工作流的唯一组合根是 ``travel_graph.application``；包入口保持轻量，能让学习者从
+    工作流的唯一组合根是 ``travel_graph.application``；包入口保持轻量，能让阅读者从
     ``state``、``nodes`` 和 ``workflow`` 的显式导入看清依赖边界，也避免导入副作用。
     """
 

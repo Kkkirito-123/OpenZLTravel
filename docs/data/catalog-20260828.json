@@ -1,0 +1,75 @@
+{
+  "name": "OpenZLTravel public catalog",
+  "created_at": "2026-08-28T12:50:42Z",
+  "download_name": "openzltravel-backups.zip",
+  "download_url": "https://drive.google.com/file/d/1bfyU_XFjQcnFIaAehMtYXhZZdvu1RdXQ/view?usp=drive_link",
+  "database": "openzltravelcatalog",
+  "schema": "catalog",
+  "format": "PostgreSQL custom archive",
+  "compression": "zstd",
+  "postgresql_version": "16.4",
+  "contains_runtime_data": false,
+  "contains_credentials": false,
+  "file": {
+    "name": "openzltravel-catalog-20260828.dump",
+    "size_bytes": 363513576,
+    "sha256": "3935F6AD76B2210DB91D33CCF643983426814C3EE3A0323C55FC00185A6332A0"
+  },
+  "counts": {
+    "source": 5,
+    "location": 1764871,
+    "locationsource": 1802290,
+    "region": 670274,
+    "locationname": 3798260,
+    "geoplace": 959064,
+    "poi": 135533,
+    "boundary": 3595,
+    "regionmatch": 1094597,
+    "schema_bytes": 2722889728
+  },
+  "sources": [
+    {
+      "code": "areacity",
+      "name": "AreaCity 行政区划与三级边界",
+      "version": "2025.251231.260403",
+      "url": "https://github.com/xiangyuecn/AreaCity-JsSpider-StatsGov",
+      "license": "项目说明允许免费使用，未声明标准 SPDX 许可证",
+      "license_url": "https://github.com/xiangyuecn/AreaCity-JsSpider-StatsGov",
+      "source_sha256": "fc42ab13a022cf312c8e463fe009afedac884676eda1d7977e56ecdc042b9867"
+    },
+    {
+      "code": "geonames",
+      "name": "GeoNames 中国地名",
+      "version": "CN dump",
+      "url": "https://download.geonames.org/export/dump/CN.zip",
+      "license": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "source_sha256": "e7987bd7d16feb81f1f34ca90682529cf5db1417e3f15f623c46b3090aa1b87d"
+    },
+    {
+      "code": "modood",
+      "name": "Modood 中国五级行政区划",
+      "version": "2.7.0 / 2023",
+      "url": "https://github.com/modood/Administrative-divisions-of-China",
+      "license": "WTFPL 2.0",
+      "license_url": "https://github.com/modood/Administrative-divisions-of-China/blob/master/LICENSE",
+      "source_sha256": "210ad17ed5de7355ff069eabec71671f7d43c39295effcb013214815ed3ecc85"
+    },
+    {
+      "code": "osm",
+      "name": "OpenStreetMap 中国数据",
+      "version": "china-latest.osm.pbf",
+      "url": "https://download.geofabrik.de/asia/china-latest.osm.pbf",
+      "license": "ODbL 1.0",
+      "license_url": "https://www.openstreetmap.org/copyright",
+      "source_sha256": "8c760b93d93629b38dde6cc64b1cf1019fbe667089941db17453764e2cefefc3"
+    },
+    {
+      "code": "system",
+      "name": "OpenZLTravel 系统节点",
+      "version": "1",
+      "url": "internal://openzltravel/catalog",
+      "license": "项目内部数据"
+    }
+  ]
+}

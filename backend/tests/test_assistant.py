@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
 from langchain_core.messages import AIMessage
 
-import assistant.service as assistant_service_module
+import assistant.agent as assistant_agent_module
+from assistant.errors import AssistantModelError
+from assistant.fact_service import AssistantFactService
 from assistant.models import (
     AssistantAction,
     AssistantDecision,
     AssistantSnapshot,
     AssistantTurnRequest,
 )
-from assistant.service import AssistantModelError, AssistantService
-from assistant.tools import AssistantToolbox
+from assistant.service import AssistantService
+from assistant.tools import _invoke
 from domain.models import (
     CandidateCatalog,
     City,
@@ -25,6 +28,7 @@ from domain.models import (
     TravelOrder,
     TravelRequirements,
 )
+from infrastructure.providers.base import ProviderError
 from infrastructure.providers.fakes import (
     FakeCatalogProvider,
     FakeHotelProvider,
@@ -42,11 +46,11 @@ class ScriptedAssistantService(AssistantService):
     async def _respond(
         self,
         snapshot: AssistantSnapshot,
-        toolbox: AssistantToolbox,
+        facts: AssistantFactService,
     ) -> str:
         current = snapshot.requirements
         if current.destination and snapshot.facts.catalog is None:
-            await toolbox.search_pois(current.destination)
+            await facts.search_pois(current.destination)
         if (
             snapshot.selection.attraction_ids
             and not current.missing_fields()
@@ -55,16 +59,16 @@ class ScriptedAssistantService(AssistantService):
             assert current.origin and current.destination
             assert current.start_date and current.end_date
             if not snapshot.facts.outbound_options:
-                await toolbox.search_rail(
+                await facts.search_rail(
                     current.origin,
                     current.destination,
                     current.start_date,
                     current.end_date,
                 )
             if current.days_count > 1 and not snapshot.facts.hotel_options:
-                await toolbox.search_hotels()
+                await facts.search_hotels()
             if not snapshot.facts.weather:
-                await toolbox.get_weather()
+                await facts.get_weather()
         return "测试模型回复"
 
     async def _decide(
@@ -84,13 +88,13 @@ class ScriptedAssistantService(AssistantService):
             else {}
         )
         return AssistantDecision(
-            reply="测试模型回复",
             patch=patch,
             attraction_ids=(
                 ["poi-west-lake", "poi-lingyin"]
                 if "西湖和灵隐寺" in user_text
                 else []
             ),
+            self_arranged_hotel="酒店我自己安排" in user_text,
             submit_requested=user_text == "开始规划",
         )
 
@@ -185,7 +189,7 @@ async def test_assistant_collects_choices_and_issues_refreshed_order(
     )
     snapshot, token = _session(events)
     assert snapshot.facts.catalog is not None
-    assert [event for event, _data in events if event == "tool.started"] == ["tool.started"]
+    assert [event for event, _data in events if event == "tool.result"] == ["tool.result"]
 
     events = await service.turn(
         AssistantTurnRequest(
@@ -208,7 +212,6 @@ async def test_assistant_collects_choices_and_issues_refreshed_order(
     for action in (
         AssistantAction(kind="select_outbound", option_id=outbound_id, seat_type="二等座"),
         AssistantAction(kind="select_return", option_id=returning_id, seat_type="二等座"),
-        AssistantAction(kind="select_hotel", hotel_id="hotel-live-1"),
     ):
         events = await service.turn(
             AssistantTurnRequest(session_token=token, action=action),
@@ -216,9 +219,20 @@ async def test_assistant_collects_choices_and_issues_refreshed_order(
         )
         snapshot, token = _session(events)
 
-    assert snapshot.status == "ready"
+    assert snapshot.status == "collecting"
+
+    async def fail_if_reply_model_is_called(
+        _snapshot: AssistantSnapshot,
+        _facts: AssistantFactService,
+    ) -> str:
+        raise AssertionError("同一轮补齐并提交后不应再生成 Assistant 话术")
+
+    monkeypatch.setattr(service, "_respond", fail_if_reply_model_is_called)
     submitted = await service.turn(
-        AssistantTurnRequest(session_token=token, message="开始规划"),
+        AssistantTurnRequest(
+            session_token=token,
+            message="酒店我自己安排，所有信息确认，开始吧",
+        ),
         user_id,
     )
     handoff = next(data for event, data in submitted if event == "handoff.ready")
@@ -236,7 +250,8 @@ async def test_assistant_collects_choices_and_issues_refreshed_order(
     ]
     assert len(order.facts.outbound_options) == 1
     assert len(order.facts.return_options) == 1
-    assert len(order.facts.hotel_options) == 1
+    assert order.selection.self_arranged_hotel is True
+    assert len(order.facts.hotel_options) == 0
 
 
 @pytest.mark.asyncio
@@ -288,19 +303,42 @@ async def test_provider_degradation_is_exposed_as_tool_result(
             budget=5000,
         )
     )
-    toolbox = AssistantToolbox(
+    facts = AssistantFactService(
         _dependencies(hotel_warning="实时价格不可用，已使用目录降级"), snapshot
     )
 
-    await toolbox.search_pois("杭州")
-    await toolbox.search_hotels()
+    await facts.search_pois("杭州")
+    await facts.search_hotels()
 
     result = next(
         data
-        for event, data in toolbox.events
+        for event, data in facts.events
         if event == "tool.result" and data["name"] == "search_hotels"
     )
     assert result["data"]["warning"] == "实时价格不可用，已使用目录降级"
+
+
+@pytest.mark.asyncio
+async def test_provider_error_is_structured_for_agent_and_event() -> None:
+    facts = AssistantFactService(_dependencies(), AssistantSnapshot())
+
+    async def unavailable() -> None:
+        raise ProviderError(
+            "rail_not_on_sale",
+            "该日期尚未进入 12306 预售期",
+            retryable=False,
+        )
+
+    result = json.loads(await _invoke(facts, "search_rail_options", unavailable))
+
+    assert result == {
+        "error": {
+            "code": "rail_not_on_sale",
+            "message": "该日期尚未进入 12306 预售期",
+            "retryable": False,
+        }
+    }
+    assert facts.events[-1][1]["data"] == result
 
 
 def test_signed_tokens_reject_tampering_expiry_and_cross_user() -> None:
@@ -346,6 +384,14 @@ async def test_missing_model_is_not_silently_replaced_by_rule_dialogue(
         await service.turn(AssistantTurnRequest(message="想出去散心"), "user-1")
 
 
+def test_model_timeout_uses_runtime_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.setenv("AUTH_MODE", "dev")
+    monkeypatch.setenv("OPENAI_TIMEOUT_SECONDS", "60")
+
+    assert Settings.from_env().model_timeout_seconds == 60
+
+
 @pytest.mark.asyncio
 async def test_model_reply_is_not_overwritten_by_missing_field_rules(
     monkeypatch: pytest.MonkeyPatch,
@@ -356,7 +402,7 @@ async def test_model_reply_is_not_overwritten_by_missing_field_rules(
     )
 
     events = await service.turn(AssistantTurnRequest(message="想出去散心"), "user-1")
-    reply = next(data for event, data in events if event == "message.delta")
+    reply = next(data for event, data in events if event == "message.completed")
 
     assert reply["content"] == "测试模型回复"
 
@@ -372,7 +418,7 @@ async def test_agent_uses_model_compatible_json_instead_of_forced_tool_strategy(
     settings = Settings.from_env()
     class FakeExtractor:
         async def ainvoke(self, _prompt: str) -> AIMessage:
-            return AIMessage(content='{"reply":"待生成","patch":{}}')
+            return AIMessage(content='{"patch":{}}')
 
     class FakeModel:
         def bind(self, **_kwargs: object) -> FakeExtractor:
@@ -385,7 +431,7 @@ async def test_agent_uses_model_compatible_json_instead_of_forced_tool_strategy(
 
     decision = await service._decide(AssistantSnapshot(), "心情不好")
 
-    assert decision.reply == "待生成"
+    assert decision.patch.model_dump(exclude_none=True) == {}
 
 
 @pytest.mark.asyncio
@@ -411,14 +457,14 @@ async def test_agent_uses_model_compatible_json_for_reply(
     def fake_create_agent(*_args: object, **_kwargs: object) -> FakeAgent:
         return FakeAgent()
 
-    monkeypatch.setattr(assistant_service_module, "create_agent", fake_create_agent)
+    monkeypatch.setattr(assistant_agent_module, "create_agent", fake_create_agent)
     service = AssistantService(
         _dependencies(), settings, SignedPayloadCodec(settings.signing_secret)
     )
     service.model = object()  # type: ignore[assignment]
     reply = await service._respond(
         AssistantSnapshot(),
-        AssistantToolbox(_dependencies(), AssistantSnapshot()),
+        AssistantFactService(_dependencies(), AssistantSnapshot()),
     )
 
     assert reply == '```json\n{"reply":"先聊聊你想怎么放松。"}\n```'

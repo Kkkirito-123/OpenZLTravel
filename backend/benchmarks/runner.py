@@ -17,8 +17,7 @@ from langgraph.store.memory import InMemoryStore
 from langgraph.types import Command
 from pydantic import SecretStr
 
-from benchmarks.cases import AssistantBenchmarkCase, GraphBenchmarkCase, load_cases
-from benchmarks.fixtures import assistant_dependencies, planning_dependencies, travel_order
+from assistant.fact_service import AssistantFactService
 from assistant.models import (
     AssistantAction,
     AssistantDecision,
@@ -26,7 +25,8 @@ from assistant.models import (
     AssistantTurnRequest,
 )
 from assistant.service import AssistantService
-from assistant.tools import AssistantToolbox
+from benchmarks.cases import AssistantBenchmarkCase, GraphBenchmarkCase, load_cases
+from benchmarks.fixtures import assistant_dependencies, planning_dependencies, travel_order
 from domain.errors import TravelGraphError
 from runtime.config import Settings
 from runtime.tokens import SignedPayloadCodec, TokenError
@@ -48,38 +48,38 @@ class ReplayAssistantService(AssistantService):
         index = sum(item.role == "user" for item in snapshot.messages) - 1
         turn = self.case.turns[index]
         decision = AssistantDecision.model_validate(
-            {"reply": turn.replay_reply, **turn.replay_decision}
+            turn.replay_decision
         )
         return decision
 
     async def _respond(  # noqa: C901 - replay dispatch intentionally mirrors tool names
-        self, snapshot: AssistantSnapshot, toolbox: AssistantToolbox
+        self, snapshot: AssistantSnapshot, facts: AssistantFactService
     ) -> str:
         index = sum(item.role == "user" for item in snapshot.messages) - 1
         turn = self.case.turns[index]
         for tool_name in turn.replay_tools:
             if tool_name == "resolve_place":
-                await toolbox.resolve_place(snapshot.requirements.destination or "杭州")
+                await facts.resolve_place(snapshot.requirements.destination or "杭州")
             elif tool_name == "recommend_destinations":
-                await toolbox.recommend_destinations(
+                await facts.recommend_destinations(
                     snapshot.requirements.origin or "上海",
                     snapshot.requirements.region or "江南",
                 )
             elif tool_name == "search_pois":
-                await toolbox.search_pois(snapshot.requirements.destination or "杭州")
+                await facts.search_pois(snapshot.requirements.destination or "杭州")
             elif tool_name in {"search_rail", "search_rail_options"}:
                 if snapshot.requirements.origin and snapshot.requirements.destination:
                     if snapshot.requirements.start_date and snapshot.requirements.end_date:
-                        await toolbox.search_rail(
+                        await facts.search_rail(
                             snapshot.requirements.origin,
                             snapshot.requirements.destination,
                             snapshot.requirements.start_date,
                             snapshot.requirements.end_date,
                         )
             elif tool_name == "search_hotels":
-                await toolbox.search_hotels()
+                await facts.search_hotels()
             elif tool_name == "get_weather":
-                await toolbox.get_weather()
+                await facts.get_weather()
             else:
                 raise ValueError(f"未知 Replay 工具: {tool_name}")
         return turn.replay_reply
@@ -129,7 +129,7 @@ async def _run_assistant_case(case: AssistantBenchmarkCase) -> dict[str, Any]:
     tools = [
         TOOL_ALIASES.get(str(data.get("name")), str(data.get("name")))
         for event, data in all_events
-        if event == "tool.started"
+        if event == "tool.result"
     ]
     return {
         "case_id": case.case_id,
@@ -158,7 +158,7 @@ def _assert_assistant_turn(
     actual_tools = {
         TOOL_ALIASES.get(str(data.get("name")), str(data.get("name")))
         for event, data in events
-        if event == "tool.started"
+        if event == "tool.result"
     }
     expected_tools = {TOOL_ALIASES.get(item, item) for item in expected.required_tools}
     forbidden_tools = {TOOL_ALIASES.get(item, item) for item in expected.forbidden_tools}
@@ -461,7 +461,9 @@ async def _run_real_assistant_case(case: AssistantBenchmarkCase) -> dict[str, An
         events = await service.turn(AssistantTurnRequest(**payload), "benchmark-user")
         session = next(data for event, data in events if event == "session.updated")
         token = str(session["session_token"])
-        reply = str(next(data for event, data in events if event == "message.delta")["content"])
+        reply = str(
+            next(data for event, data in events if event == "message.completed")["content"]
+        )
     return {"reply": reply}
 
 

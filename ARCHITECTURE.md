@@ -31,7 +31,7 @@ Assistant 与 TravelGraph 业务隔离：不共享 Graph State、Checkpoint 或�
 
 | 层 | 职责 |
 |---|---|
-| `backend/src/assistant/` | 独立 LangChain 服务：会话恢复、Agent、只读工具、SSE 和工单签发 |
+| `backend/src/assistant/` | 独立 LangChain 服务：意图提取、Agent、事实工具、会话和工单交接 |
 | `backend/src/travel_graph/` | 独立 LangGraph 服务：工单认证、日程、路线、预算、确认、保存和 HTTP API |
 | `backend/src/domain/` | 两个服务共享的 TravelOrder、事实模型、确定性规划和校验 |
 | `backend/src/infrastructure/` | Catalog、12306、RollingGo、天气和路线 Provider 适配器 |
@@ -73,7 +73,7 @@ Assistant 没有服务端会话数据库。浏览器 `sessionStorage` 保存：
 
 ```text
 phase / order / facts / draft / budget
-route_revision_instruction / warnings / errors / trip_id
+route_revision_instruction / warnings / trip_id
 ```
 
 Graph 不接收旧 `messages`、快速表单或选择 interrupt。`validate_order` 只验证 Order Token 和
@@ -92,8 +92,7 @@ Graph 不接收旧 `messages`、快速表单或选择 interrupt。`validate_orde
 `POST /api/assistant/turn` 请求只接受 `message` 或 `action` 其中一个。事件为：
 
 ```text
-message.delta
-tool.started
+message.completed
 tool.result
 session.updated
 handoff.ready

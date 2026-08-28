@@ -9,7 +9,6 @@ import type { AssistantAction, AssistantHandoff, AssistantSnapshot } from "../..
 
 export interface AssistantCallbacks {
   onMessage: (content: string) => void;
-  onToolStarted: (name: string) => void;
   onToolResult: (name: string, artifact?: string) => void;
   onSession: (snapshot: AssistantSnapshot, sessionToken: string) => void;
   onHandoff: (handoff: AssistantHandoff) => void;
@@ -52,8 +51,7 @@ export class AssistantGateway {
     const raw = block.split("\n").filter((line) => line.startsWith("data:"))
       .map((line) => line.slice(5).trim()).join("\n");
     const data = raw ? JSON.parse(raw) as Record<string, unknown> : {};
-    if (event === "message.delta" && typeof data.content === "string") callbacks.onMessage(data.content);
-    if (event === "tool.started" && typeof data.name === "string") callbacks.onToolStarted(data.name);
+    if (event === "message.completed" && typeof data.content === "string") callbacks.onMessage(data.content);
     if (event === "tool.result" && typeof data.name === "string") {
       callbacks.onToolResult(data.name, typeof data.artifact === "string" ? data.artifact : undefined);
     }

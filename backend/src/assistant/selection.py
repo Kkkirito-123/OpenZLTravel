@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from assistant.models import AssistantAction, AssistantDecision, AssistantSnapshot
+from domain.errors import TravelGraphError
 from domain.models import (
     RailChoice,
     RequirementPatch,
@@ -19,6 +20,7 @@ from domain.models import (
     TravelRequirements,
     TravelSelection,
 )
+from domain.validation import validate_selection
 
 
 def apply_action(snapshot: AssistantSnapshot, action: AssistantAction) -> str:  # noqa: C901
@@ -126,6 +128,37 @@ def apply_decision(snapshot: AssistantSnapshot, decision: AssistantDecision) -> 
             updates[flag] = True
             updates[field] = None
     snapshot.selection = snapshot.selection.model_copy(update=updates)
+
+
+def travel_choices_complete(snapshot: AssistantSnapshot) -> bool:
+    """判断景点、往返交通和住宿选择是否已经完整。"""
+
+    selection = snapshot.selection
+    requirements = snapshot.requirements
+    rail_complete = bool(selection.outbound or selection.self_arranged_outbound) and bool(
+        selection.return_trip or selection.self_arranged_return
+    )
+    hotel_complete = requirements.days_count <= 1 or bool(
+        selection.hotel_id or selection.self_arranged_hotel
+    )
+    return bool(selection.attraction_ids) and rail_complete and hotel_complete
+
+
+def update_status(snapshot: AssistantSnapshot) -> None:
+    """根据需求、事实和选择派生会话状态。"""
+
+    missing = snapshot.requirements.missing_fields()
+    if snapshot.requirements.budget is None:
+        missing.append("budget")
+    if missing or not travel_choices_complete(snapshot):
+        snapshot.status = "collecting"
+        return
+    try:
+        validate_selection(snapshot.requirements, snapshot.facts, snapshot.selection)
+    except TravelGraphError:
+        snapshot.status = "collecting"
+        return
+    snapshot.status = "ready"
 
 
 def _apply_rail_action(snapshot: AssistantSnapshot, action: AssistantAction) -> str:

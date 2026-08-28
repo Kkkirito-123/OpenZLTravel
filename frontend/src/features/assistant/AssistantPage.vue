@@ -18,6 +18,7 @@ import ItineraryPanel from "../planning/ItineraryPanel.vue";
 import RoutePreviewCard from "../planning/RoutePreviewCard.vue";
 import HistoryDrawer from "../trips/HistoryDrawer.vue";
 import AssistantCards from "./AssistantCards.vue";
+import AssistantMarkdown from "./AssistantMarkdown.vue";
 import { useAssistantWorkspace } from "./useAssistantWorkspace";
 
 const workspace = useAssistantWorkspace();
@@ -42,7 +43,8 @@ watch(
   () => [
     workspace.assistant.value.messages.length,
     workspace.pendingUserMessage.value,
-    workspace.streamingReply.value,
+    workspace.turnReply.value,
+    workspace.running.value,
     workspace.tools.value.length,
   ],
   async () => {
@@ -107,9 +109,10 @@ function stepState(node: string): "active" | "done" | "idle" {
               <div class="example-grid"><button type="button" @click="useExample('从上海出发，国庆想去杭州玩三天，2个人预算5000元')">上海出发，杭州三天</button><button type="button" @click="useExample('从北京出发，推荐一个适合周末慢旅行的江南城市')">推荐江南周末城市</button></div>
             </div>
 
-            <article v-for="message in workspace.assistant.value.messages" :key="message.message_id" :class="['chat-row', message.role]"><span class="chat-avatar"><Bot v-if="message.role === 'assistant'" :size="16" /><span v-else>我</span></span><p>{{ message.content }}</p></article>
+            <article v-for="message in workspace.assistant.value.messages" :key="message.message_id" :class="['chat-row', message.role]"><span class="chat-avatar"><Bot v-if="message.role === 'assistant'" :size="16" /><span v-else>我</span></span><AssistantMarkdown v-if="message.role === 'assistant'" :content="message.content" /><p v-else>{{ message.content }}</p></article>
             <article v-if="workspace.pendingUserMessage.value" class="chat-row user pending"><span class="chat-avatar">我</span><p>{{ workspace.pendingUserMessage.value }}</p></article>
-            <article v-if="workspace.streamingReply.value" class="chat-row assistant"><span class="chat-avatar"><Bot :size="16" /></span><p>{{ workspace.streamingReply.value }}</p></article>
+            <article v-if="workspace.running.value && workspace.pendingUserMessage.value && !workspace.turnReply.value" class="chat-row assistant waiting" role="status" aria-live="polite"><span class="chat-avatar"><Bot :size="16" /></span><div class="assistant-waiting"><LoaderCircle class="spin" :size="15" /><span>正在查询并整理这轮信息</span></div></article>
+            <article v-if="workspace.turnReply.value" class="chat-row assistant"><span class="chat-avatar"><Bot :size="16" /></span><AssistantMarkdown :content="workspace.turnReply.value" /></article>
 
             <section v-if="workspace.isPlanning.value" class="planning-card">
               <header><Route :size="19" /><div><strong>Travel LangGraph 正在执行</strong><p>图只使用签名工单事实，并查询最终路线。</p></div></header>
@@ -131,7 +134,7 @@ function stepState(node: string): "active" | "done" | "idle" {
             <div class="session-status"><span :class="workspace.assistant.value.status" />Assistant：{{ workspace.assistant.value.status }}</div><p>公开快照与签名 Token 仅保存在当前浏览器会话；Graph 不接收前端自造事实。</p>
           </section>
 
-          <section v-if="workspace.tools.value.length" class="tool-trace" aria-label="工具调用状态"><header><Wrench :size="15" /><strong>工具活动</strong></header><ul><li v-for="tool in workspace.tools.value" :key="tool.name"><LoaderCircle v-if="tool.status === 'running'" class="spin" :size="14" /><span v-else class="tool-done">✓</span><span>{{ tool.name }}</span><small>{{ tool.artifact || tool.status }}</small></li></ul></section>
+          <section v-if="workspace.tools.value.length" class="tool-trace" aria-label="工具调用结果"><header><Wrench :size="15" /><strong>工具活动</strong></header><ul><li v-for="tool in workspace.tools.value" :key="tool.name"><span class="tool-done">✓</span><span>{{ tool.name }}</span><small>{{ tool.artifact || tool.status }}</small></li></ul></section>
 
           <AssistantCards v-if="!workspace.displayedTrip.value && !workspace.isPlanning.value" :snapshot="workspace.assistant.value" :busy="workspace.running.value" @select="workspace.select" />
         </aside>

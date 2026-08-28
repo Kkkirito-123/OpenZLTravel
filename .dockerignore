@@ -9,6 +9,7 @@ backend/.venv
 .mypy_cache
 .ruff_cache
 .pytest_cache
+backend/.pytest-tmp
 **/__pycache__
 **/*.pyc
 **/*.pyo
